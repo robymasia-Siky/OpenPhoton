@@ -8,7 +8,12 @@
 #include <string>
 #include <thread>
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
+#undef min
+#undef max
 #include <winhttp.h>
 #endif
 
@@ -177,3 +182,4 @@ private:
 };
 
 } // namespace OpenPhoton
+

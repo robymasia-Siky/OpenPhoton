@@ -29,6 +29,7 @@ target_include_directories(OpenPhotonCore PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dr_libs"
 )
+target_compile_definitions(OpenPhotonCore PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(OpenPhotonCore PUBLIC onnxruntime)
 
 set(SMTG_CREATE_BUNDLE_FOR_WINDOWS ON CACHE BOOL "" FORCE)
@@ -69,3 +70,4 @@ if(WIN32)
             "$<TARGET_FILE_DIR:OpenPhoton>"
     )
 endif()
+
