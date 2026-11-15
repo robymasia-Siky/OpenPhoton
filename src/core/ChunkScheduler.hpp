@@ -6,6 +6,7 @@
 #include "Telemetry.hpp"
 #include "DeepFilterBridge.hpp"
 #include "ModelManager.hpp"
+#include "DebugLog.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -37,7 +38,7 @@ public:
         stop();
         pluginDir_ = pluginDir;
         if (!customOnnxPath.empty()) {
-            attachModel(customOnnxPath);
+            requestModelLoad(customOnnxPath);
         } else {
             autoSwitchModelForPreset(modelType_.load(std::memory_order_relaxed));
         }
@@ -46,7 +47,7 @@ public:
     }
 
     void loadModelRuntime(const std::wstring& onnxModelPath) {
-        attachModel(onnxModelPath);
+        requestModelLoad(onnxModelPath);
         cache_.markAllCapturedForReprocess();
         wakeWorker();
     }
@@ -55,7 +56,7 @@ public:
         const int id = static_cast<int>(modelType_.load(std::memory_order_relaxed));
         if (id < 0 || id > 2) return;
         modelManager_.startDownload(id, [this](std::wstring downloadedPath) {
-            attachModel(downloadedPath);
+            requestModelLoad(downloadedPath);
             cache_.markAllCapturedForReprocess();
             wakeWorker();
         });
@@ -181,33 +182,44 @@ public:
     }
 
 private:
+    void requestModelLoad(const std::wstring& path) {
+        std::lock_guard<std::mutex> lk(pendingMtx_);
+        pendingModelPath_ = path;
+        modelLoadPending_.store(true, std::memory_order_release);
+    }
+
     void autoSwitchModelForPreset(ModelType t) {
         const int id = static_cast<int>(t);
         if (id >= 0 && id <= 2 && ModelManager::isModelInstalled(id)) {
-            attachModel(ModelManager::getModelPath(id).wstring());
+            requestModelLoad(ModelManager::getModelPath(id).wstring());
         } else {
+            requestModelLoad(L"");
             std::lock_guard<std::mutex> lk(engineMtx_);
-            engine_.reset();
             loadedModelName_ = (t == ModelType::VoiceRestore)
                 ? (dfBridge_.isReady() ? "DeepFilterNet3 AI" : "Spectral Wiener Denoise")
                 : "Spectral DSP (Click Get AI Model)";
         }
     }
 
-    void attachModel(const std::wstring& onnxModelPath) {
+    void attachModelOnWorker(const std::wstring& onnxModelPath) {
         std::lock_guard<std::mutex> lk(engineMtx_);
         engine_.reset();
-        loadedModelName_ = "Spectral DSP";
-        if (!onnxModelPath.empty()) {
-            try {
-                engine_ = std::make_unique<OnnxEngine>(onnxModelPath, ExecutionBackend::Auto, 0);
-                auto u8 = std::filesystem::path(onnxModelPath).filename().u8string();
-                loadedModelName_.assign(reinterpret_cast<const char*>(u8.data()),
-                                        std::min<size_t>(u8.size(), 60));
-            } catch (...) {
-                engine_.reset();
-                loadedModelName_ = "ONNX Load Failed";
-            }
+        if (onnxModelPath.empty()) {
+            const auto t = modelType_.load(std::memory_order_relaxed);
+            loadedModelName_ = (t == ModelType::VoiceRestore)
+                ? (dfBridge_.isReady() ? "DeepFilterNet3 AI" : "Spectral Wiener Denoise")
+                : "Spectral DSP (Click Get AI Model)";
+            return;
+        }
+        try {
+            loadedModelName_ = "Loading ONNX GPU...";
+            engine_ = std::make_unique<OnnxEngine>(onnxModelPath, ExecutionBackend::Auto, 0);
+            auto u8 = std::filesystem::path(onnxModelPath).filename().u8string();
+            loadedModelName_.assign(reinterpret_cast<const char*>(u8.data()),
+                                    std::min<size_t>(u8.size(), 60));
+        } catch (...) {
+            engine_.reset();
+            loadedModelName_ = "ONNX Load Failed";
         }
     }
 
@@ -240,11 +252,20 @@ private:
         std::vector<float> in44k(kNumChannels * kDemucsSamples, 0.0f);
 
         while (running_.load(std::memory_order_acquire)) {
+            if (modelLoadPending_.exchange(false, std::memory_order_acq_rel)) {
+                std::wstring path;
+                {
+                    std::lock_guard<std::mutex> lk(pendingMtx_);
+                    path = pendingModelPath_;
+                }
+                attachModelOnWorker(path);
+            }
+
             const size_t idx = findBestChunkToProcess();
             if (idx >= kMaxChunks) {
                 std::unique_lock<std::mutex> lk(mtx_);
                 cv_.wait_for(lk, std::chrono::milliseconds(40), [&] {
-                    return !running_.load() || hasWork_.exchange(false);
+                    return !running_.load() || modelLoadPending_.load() || hasWork_.exchange(false);
                 });
                 continue;
             }
@@ -476,6 +497,9 @@ private:
     mutable std::mutex engineMtx_;
     std::unique_ptr<OnnxEngine> engine_;
     std::string loadedModelName_ = "Spectral DSP";
+    std::mutex pendingMtx_;
+    std::wstring pendingModelPath_;
+    std::atomic<bool> modelLoadPending_{false};
     std::atomic<ModelType> modelType_{ModelType::Music4Stems};
     std::atomic<float> denoiseStrength_{0.7f};
     std::atomic<float> viewStart_{0.0f};

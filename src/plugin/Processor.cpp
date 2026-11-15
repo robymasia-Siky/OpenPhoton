@@ -115,6 +115,7 @@ tresult PLUGIN_API Processor::setupProcessing(ProcessSetup& newSetup) {
 }
 
 tresult PLUGIN_API Processor::setActive(TBool state) {
+    logTrace(state ? "Processor::setActive(true) v5" : "Processor::setActive(false) v5");
     if (state) {
         cache_.preallocateInitialChunks(8);
         preloadOnnxRuntimeFromPluginDir();
@@ -123,6 +124,7 @@ tresult PLUGIN_API Processor::setActive(TBool state) {
             modelPath = utf8ToWide(env);
         }
         scheduler_.start(getPluginDir(), modelPath);
+        logTrace("Processor::setActive(true) v5 OK");
     } else {
         internalPlaying_.store(false, std::memory_order_release);
         scheduler_.stop();
@@ -348,3 +350,4 @@ tresult PLUGIN_API Processor::notify(IMessage* message) {
 }
 
 } // namespace OpenPhoton
+

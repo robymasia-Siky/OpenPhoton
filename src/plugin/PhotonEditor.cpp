@@ -1,5 +1,6 @@
 ﻿#include "PhotonEditor.hpp"
 #include "Controller.hpp"
+#include "core/DebugLog.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -183,7 +184,7 @@ public:
         const CCoord maxScrollY = std::max(0.0, totalLanesH - visibleH);
         scrollY_ = std::clamp(scrollY_, 0.0, maxScrollY);
 
-        ctx->setClipRect(CRect(plotArea.left + 1.0, waveArea.top, plotArea.right - 1.0, plotArea.bottom - 1.0));
+        // Clipping geometrico sicuro senza setClipRect Direct2D
 
         const char* labelsMusic[6] = { "VOCALS", "DRUMS", "BASS", "GUITAR", "PIANO", "OTHER" };
         const char* labelsVoice[6] = { "CLEAN",  "---",   "---",  "---",    "---",   "NOISE" };
@@ -192,7 +193,7 @@ public:
         for (int s = 0; s < 6; ++s) {
             const CCoord y0 = waveArea.top + s * laneH - scrollY_;
             const CCoord y1 = y0 + laneH;
-            if (y1 < waveArea.top || y0 > waveArea.bottom) continue;
+            if (y0 < waveArea.top - 1.0 || y1 > waveArea.bottom + 1.0) continue;
 
             const CColor c = stemColor(s);
             ctx->setFillColor(CColor(20, 25, 36, 255));
@@ -233,7 +234,7 @@ public:
             ctx->drawLine(CPoint(px, waveArea.top), CPoint(px, waveArea.bottom));
         }
 
-        ctx->resetClipRect();
+
 
         const CRect vTrack(r.right - vScrollW, r.top, r.right, r.bottom - hScrollH);
         ctx->setFillColor(CColor(16, 20, 28, 255));
@@ -546,6 +547,7 @@ PhotonEditor::PhotonEditor(Controller* controller)
 }
 
 bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformType) {
+    logTrace("PhotonEditor::open v5 start");
     if (frame) {
         frame->forget();
         frame = nullptr;
@@ -682,6 +684,7 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
         syncParameterToUI(kParamMode, static_cast<double>(snap.currentMode) * 0.5);
     }, 66);
     timer_->start();
+    logTrace("PhotonEditor::open v5 OK");
 
     return true;
 }
@@ -827,3 +830,4 @@ void PhotonEditor::syncParameterToUI(Steinberg::Vst::ParamID tag, Steinberg::Vst
 }
 
 } // namespace OpenPhoton
+

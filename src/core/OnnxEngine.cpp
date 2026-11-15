@@ -3,6 +3,7 @@
 #include <chrono>
 #include <stdexcept>
 #ifdef _WIN32
+#include <objbase.h>
 #include <dml_provider_factory.h>
 #endif
 
@@ -14,6 +15,10 @@ OnnxEngine::OnnxEngine(const std::wstring& modelPath,
     : env_(ORT_LOGGING_LEVEL_WARNING, "OpenPhotonORT"),
       memoryInfo_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault))
 {
+    logTrace("OnnxEngine: creating SessionOptions");
+#ifdef _WIN32
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
     sessionOptions_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     bool dmlAttached = false;
@@ -38,7 +43,9 @@ OnnxEngine::OnnxEngine(const std::wstring& modelPath,
         sessionOptions_.SetIntraOpNumThreads(0);
     }
 
+    logTrace("OnnxEngine: loading Ort::Session...");
     session_ = std::make_unique<Ort::Session>(env_, modelPath.c_str(), sessionOptions_);
+    logTrace("OnnxEngine: Ort::Session loaded OK.");
 
     Ort::AllocatorWithDefaultOptions allocator;
     const size_t nInputs = session_->GetInputCount();
