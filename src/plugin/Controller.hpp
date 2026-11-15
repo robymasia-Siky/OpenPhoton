@@ -21,6 +21,8 @@ public:
     void editorDestroyed(Steinberg::Vst::EditorView* editor) override;
 
     void sendCommandMessage(const char* msgId, const std::string& utf8Path = {});
+    void sendPollTelemetry(double vStart, double vZoom);
+    void sendSeekNormalized(double norm);
     TelemetrySnapshot getLatestTelemetry() const;
 
 private:

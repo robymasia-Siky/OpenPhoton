@@ -1,7 +1,6 @@
 ﻿#include "Controller.hpp"
 #include "PhotonEditor.hpp"
 #include "PluginIds.hpp"
-#include "core/DebugLog.hpp"
 #include "public.sdk/source/vst/vstparameters.h"
 #include "pluginterfaces/base/ftypes.h"
 #include <cstring>
@@ -16,8 +15,6 @@ using namespace Steinberg;
 using namespace Steinberg::Vst;
 
 tresult PLUGIN_API Controller::initialize(FUnknown* context) {
-    logTrace("Controller::initialize start");
-    logTrace("Controller::initialize start");
     tresult res = EditController::initialize(context);
     if (res != kResultOk) return res;
 
@@ -60,12 +57,10 @@ tresult PLUGIN_API Controller::initialize(FUnknown* context) {
     parameters.addParameter(STR16("Other Solo"),  nullptr, 1, 0.0, ParameterInfo::kCanAutomate, kParamOtherSolo);
 
     parameters.addParameter(STR16("Clear Cache"), nullptr, 1, 0.0, 0, kParamClearCache);
-    logTrace("Controller::initialize end");
     return kResultOk;
 }
 
 IPlugView* PLUGIN_API Controller::createView(FIDString name) {
-    logTrace("Controller::createView");
     if (FIDStringsEqual(name, ViewType::kEditor)) {
         activeEditor_ = new PhotonEditor(this);
         return activeEditor_;
@@ -104,6 +99,23 @@ void Controller::sendCommandMessage(const char* msgId, const std::string& utf8Pa
     }
 }
 
+void Controller::sendPollTelemetry(double vStart, double vZoom) {
+    if (auto msg = Steinberg::owned(allocateMessage())) {
+        msg->setMessageID("PollTelemetry");
+        msg->getAttributes()->setFloat("vStart", vStart);
+        msg->getAttributes()->setFloat("vZoom", vZoom);
+        sendMessage(msg);
+    }
+}
+
+void Controller::sendSeekNormalized(double norm) {
+    if (auto msg = Steinberg::owned(allocateMessage())) {
+        msg->setMessageID("SeekNormalized");
+        msg->getAttributes()->setFloat("norm", norm);
+        sendMessage(msg);
+    }
+}
+
 tresult PLUGIN_API Controller::notify(IMessage* message) {
     if (!message) return kInvalidArgument;
     const char* id = message->getMessageID();
@@ -126,6 +138,3 @@ TelemetrySnapshot Controller::getLatestTelemetry() const {
 }
 
 } // namespace OpenPhoton
-
-
-

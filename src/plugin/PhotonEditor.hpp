@@ -20,6 +20,7 @@ public:
     void valueChanged(VSTGUI::CControl* pControl) override;
 
     void syncParameterToUI(Steinberg::Vst::ParamID tag, Steinberg::Vst::ParamValue value);
+    void toggleSingleStemSolo(int stemIndex);
 
     DELEGATE_REFCOUNT(VSTGUIEditor)
 
@@ -28,6 +29,7 @@ private:
 
     Controller* photonController_ = nullptr;
     VSTGUI::CView* backdropView_ = nullptr;
+    VSTGUI::CView* waveformView_ = nullptr;
     VSTGUI::SharedPointer<VSTGUI::CVSTGUITimer> timer_;
     std::unordered_map<Steinberg::Vst::ParamID, VSTGUI::CControl*> controls_;
 };

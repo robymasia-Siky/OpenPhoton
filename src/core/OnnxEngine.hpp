@@ -9,7 +9,7 @@ namespace OpenPhoton {
 
 enum class ExecutionBackend {
     Auto,
-    CUDA,
+    DirectML,
     CPU
 };
 

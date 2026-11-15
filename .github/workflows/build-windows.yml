@@ -11,17 +11,31 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Clone VST3 SDK, dr_wav & Download ONNX Runtime GPU
+      - name: Clone VST3 SDK, dr_wav & Download ONNX Runtime DirectML
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path third_party/dr_libs | Out-Null
+          New-Item -ItemType Directory -Force -Path third_party/dr_libs, third_party/onnxruntime/include, third_party/onnxruntime/lib | Out-Null
           git clone --recursive --depth 1 https://github.com/steinbergmedia/vst3sdk.git third_party/vst3sdk
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/mackron/dr_libs/master/dr_wav.h" -OutFile "third_party/dr_libs/dr_wav.h"
+
           $OrtVer = "1.20.1"
-          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVer/onnxruntime-win-x64-gpu-$OrtVer.zip" -OutFile ort.zip
-          Expand-Archive ort.zip -DestinationPath third_party -Force
-          Rename-Item "third_party/onnxruntime-win-x64-gpu-$OrtVer" "onnxruntime"
-          Remove-Item ort.zip -Force
+          $DmlVer = "1.15.4"
+          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVer/onnxruntime-win-x64-$OrtVer.zip" -OutFile ort-cpu.zip
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/$OrtVer" -OutFile ort-dml.zip
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/$DmlVer" -OutFile directml.zip
+
+          Expand-Archive ort-cpu.zip -DestinationPath third_party -Force
+          Expand-Archive ort-dml.zip -DestinationPath third_party/ort-dml -Force
+          Expand-Archive directml.zip -DestinationPath third_party/directml -Force
+
+          Copy-Item -Recurse -Force "third_party/onnxruntime-win-x64-$OrtVer/include/*" "third_party/onnxruntime/include/"
+          Get-ChildItem -Path "third_party/ort-dml" -Filter "dml_provider_factory.h" -Recurse | ForEach-Object {
+              Copy-Item -Force $_.FullName "third_party/onnxruntime/include/"
+          }
+          Copy-Item -Force "third_party/ort-dml/runtimes/win-x64/native/onnxruntime.dll" "third_party/onnxruntime/lib/"
+          Copy-Item -Force "third_party/ort-dml/runtimes/win-x64/native/onnxruntime.lib" "third_party/onnxruntime/lib/"
+          Copy-Item -Force "third_party/directml/bin/x64-win/DirectML.dll" "third_party/onnxruntime/lib/"
+          Remove-Item ort-cpu.zip, ort-dml.zip, directml.zip -Force
 
       - name: Build DeepFilterNet3 Native C-API (df.dll)
         shell: pwsh

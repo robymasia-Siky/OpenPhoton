@@ -1,6 +1,10 @@
 ﻿#include "OnnxEngine.hpp"
+#include "DebugLog.hpp"
 #include <chrono>
 #include <stdexcept>
+#ifdef _WIN32
+#include <dml_provider_factory.h>
+#endif
 
 namespace OpenPhoton {
 
@@ -11,26 +15,27 @@ OnnxEngine::OnnxEngine(const std::wstring& modelPath,
       memoryInfo_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault))
 {
     sessionOptions_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-    sessionOptions_.SetIntraOpNumThreads(2);
 
-    bool cudaAttached = false;
-    if (backend == ExecutionBackend::Auto || backend == ExecutionBackend::CUDA) {
+    bool dmlAttached = false;
+#ifdef _WIN32
+    if (backend == ExecutionBackend::Auto || backend == ExecutionBackend::DirectML) {
         try {
-            OrtCUDAProviderOptions cudaOpts{};
-            cudaOpts.device_id = gpuDeviceId;
-            cudaOpts.arena_extend_strategy = 0;
-            cudaOpts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchHeuristic;
-            cudaOpts.do_copy_in_default_stream = 1;
-
-            sessionOptions_.AppendExecutionProvider_CUDA(cudaOpts);
-            cudaAttached = true;
-            activeProvider_ = "CUDA";
-        } catch (const Ort::Exception&) {
-            if (backend == ExecutionBackend::CUDA) {
-                throw;
-            }
+            sessionOptions_.DisableMemPattern();
+            sessionOptions_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+            Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_DML(sessionOptions_, gpuDeviceId));
+            dmlAttached = true;
+            activeProvider_ = "DirectML";
+            logTrace("OnnxEngine: DirectML GPU attached.");
+        } catch (const Ort::Exception& e) {
+            logTrace(std::string("OnnxEngine: DirectML fallback CPU: ") + e.what());
+            if (backend == ExecutionBackend::DirectML) throw;
             activeProvider_ = "CPU";
         }
+    }
+#endif
+
+    if (!dmlAttached) {
+        sessionOptions_.SetIntraOpNumThreads(0);
     }
 
     session_ = std::make_unique<Ort::Session>(env_, modelPath.c_str(), sessionOptions_);
@@ -54,8 +59,6 @@ OnnxEngine::OnnxEngine(const std::wstring& modelPath,
         outputNames_.emplace_back(name.get());
     }
     for (const auto& s : outputNames_) outputNamePtrs_.push_back(s.c_str());
-
-    if (!cudaAttached) activeProvider_ = "CPU";
 }
 
 InferenceStats OnnxEngine::runAudioChunk(const float* inputData,

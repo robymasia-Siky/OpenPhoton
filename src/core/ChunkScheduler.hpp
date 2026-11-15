@@ -36,8 +36,6 @@ public:
     void start(const std::filesystem::path& pluginDir, const std::wstring& customOnnxPath) {
         stop();
         pluginDir_ = pluginDir;
-        // Lazy init di DeepFilter3 solo quando si usa VoiceRestore
-
         if (!customOnnxPath.empty()) {
             attachModel(customOnnxPath);
         } else {
@@ -68,11 +66,8 @@ public:
         running_.store(false, std::memory_order_release);
         cv_.notify_all();
         if (worker_.joinable()) worker_.join();
-        {
-            std::lock_guard<std::mutex> lk(engineMtx_);
-            engine_.reset();
-        }
-        // dfBridge_ viene mantenuto o distrutto a chiusura plugin
+        std::lock_guard<std::mutex> lk(engineMtx_);
+        engine_.reset();
     }
 
     void setModelType(ModelType t) {
@@ -94,6 +89,11 @@ public:
         }
     }
 
+    void setViewWindow(float startNorm, float zoom) noexcept {
+        viewStart_.store(std::clamp(startNorm, 0.0f, 1.0f), std::memory_order_relaxed);
+        viewZoom_.store(std::clamp(zoom, 1.0f, 32.0f), std::memory_order_relaxed);
+    }
+
     void notifyPlayhead(int64_t samplePos) noexcept {
         playheadSample_.store(samplePos >= 0 ? samplePos : 0, std::memory_order_relaxed);
         playheadChunk_.store(samplePos >= 0 ? static_cast<size_t>(samplePos) / kChunkSamples : 0,
@@ -103,7 +103,7 @@ public:
 
     void wakeWorker() { cv_.notify_one(); }
 
-    TelemetrySnapshot buildTelemetry() const {
+    TelemetrySnapshot buildTelemetry(int currentMode, bool internalPlaying) const {
         TelemetrySnapshot snap{};
         int32_t maxActive = 0;
         for (size_t i = 0; i < kMaxChunks; ++i) {
@@ -113,11 +113,14 @@ public:
         }
         snap.activeChunks = std::max<int32_t>(1, maxActive);
         snap.playheadChunk = static_cast<int32_t>(playheadChunk_.load(std::memory_order_relaxed));
-        const double totalSamples = static_cast<double>(snap.activeChunks) * static_cast<double>(kChunkSamples);
-        snap.playheadNormalized = totalSamples > 0.0
-            ? static_cast<float>(std::clamp(static_cast<double>(playheadSample_.load(std::memory_order_relaxed)) / totalSamples, 0.0, 1.0))
+        const int64_t totalSamples = static_cast<int64_t>(snap.activeChunks) * static_cast<int64_t>(kChunkSamples);
+        snap.totalDurationSeconds = static_cast<float>(totalSamples) / 48000.0f;
+        snap.playheadNormalized = totalSamples > 0
+            ? static_cast<float>(std::clamp(static_cast<double>(playheadSample_.load(std::memory_order_relaxed)) / static_cast<double>(totalSamples), 0.0, 1.0))
             : 0.0f;
         snap.lastInferenceMs = lastMs_.load(std::memory_order_relaxed);
+        snap.currentMode = static_cast<uint8_t>(currentMode);
+        snap.internalPlaying = internalPlaying ? 1 : 0;
 
         const auto mt = modelType_.load(std::memory_order_relaxed);
         snap.modelType = static_cast<uint8_t>(mt);
@@ -131,7 +134,7 @@ public:
         {
             std::lock_guard<std::mutex> lk(engineMtx_);
             snap.usingOnnx = engine_ ? 1 : 0;
-            snap.usingGpu = (engine_ && engine_->activeProvider() == "CUDA") ? 1 : 0;
+            snap.usingGpu = (engine_ && engine_->activeProvider() == "DirectML") ? 1 : 0;
             if (mt == ModelType::VoiceRestore && dfBridge_.isReady()) {
                 std::strncpy(snap.modelName, "DeepFilterNet3 AI (48kHz)", sizeof(snap.modelName) - 1);
             } else {
@@ -139,13 +142,39 @@ public:
             }
         }
 
+        const double zoom = static_cast<double>(viewZoom_.load(std::memory_order_relaxed));
+        const double span = 1.0 / zoom;
+        double vStart = static_cast<double>(viewStart_.load(std::memory_order_relaxed));
+        if (vStart + span > 1.0) vStart = std::max(0.0, 1.0 - span);
+
+        const double winStartSample = vStart * static_cast<double>(totalSamples);
+        const double winSamples = span * static_cast<double>(totalSamples);
+        const double binSamples = std::max(1.0, winSamples / static_cast<double>(kTelemetryBins));
+
         for (size_t b = 0; b < kTelemetryBins; ++b) {
-            const double pos = (static_cast<double>(b) / static_cast<double>(kTelemetryBins)) * static_cast<double>(snap.activeChunks);
-            const size_t cIdx = std::min<size_t>(static_cast<size_t>(pos), static_cast<size_t>(snap.activeChunks - 1));
-            const size_t sub = std::min<size_t>(static_cast<size_t>((pos - static_cast<double>(cIdx)) * 8.0), 7);
-            const auto& slot = cache_.slot(cIdx);
+            const int64_t s0 = static_cast<int64_t>(winStartSample + b * binSamples);
+            const int64_t s1 = std::min<int64_t>(totalSamples, static_cast<int64_t>(winStartSample + (b + 1) * binSamples));
+            const int64_t stride = std::max<int64_t>(1, (s1 - s0) / 24);
+
             for (size_t s = 0; s < kNumStems; ++s) {
-                snap.peaks[s][b] = slot.stemPeaks[s][sub];
+                float pk = 0.0f;
+                for (int64_t p = s0; p < s1; p += stride) {
+                    const size_t cIdx = static_cast<size_t>(p) / kChunkSamples;
+                    if (cIdx >= kMaxChunks) break;
+                    const auto& slot = cache_.slot(cIdx);
+                    if (!slot.allocated.load(std::memory_order_acquire)) continue;
+                    const auto st = slot.state.load(std::memory_order_acquire);
+                    const size_t loc = static_cast<size_t>(p) % kChunkSamples;
+                    if (st == ChunkState::Ready) {
+                        const size_t base = s * kNumChannels * kChunkSamples;
+                        pk = std::max(pk, std::abs(slot.stemAudio[base + loc]));
+                        pk = std::max(pk, std::abs(slot.stemAudio[base + kChunkSamples + loc]));
+                    } else if (st == ChunkState::Captured || st == ChunkState::Computing) {
+                        pk = std::max(pk, std::abs(slot.inputAudio[loc]));
+                        pk = std::max(pk, std::abs(slot.inputAudio[kChunkSamples + loc]));
+                    }
+                }
+                snap.peaks[s][b] = static_cast<uint8_t>(std::clamp(pk * 255.0f, 0.0f, 255.0f));
             }
         }
         return snap;
@@ -204,10 +233,9 @@ private:
         std::vector<int64_t> outShape;
         STFTProcessor stft(2048, 512);
 
-        // HTDemucs ONNX contract: 7.8s @ 44.1 kHz = 343980 samples
         constexpr size_t kDemucsSamples = 343980;
-        constexpr size_t kContext48k = 374400; // 7.8s @ 48 kHz
-        constexpr size_t kPad48k = (kContext48k - kChunkSamples) / 2; // 1.9s = 91200 samples
+        constexpr size_t kContext48k = 374400;
+        constexpr size_t kPad48k = (kContext48k - kChunkSamples) / 2;
         std::vector<float> win48k(kNumChannels * kContext48k, 0.0f);
         std::vector<float> in44k(kNumChannels * kDemucsSamples, 0.0f);
 
@@ -232,6 +260,7 @@ private:
             if (mode == ModelType::VoiceRestore) {
                 if (!dfBridge_.isReady()) dfBridge_.init(pluginDir_);
             }
+
             if (mode == ModelType::VoiceRestore && dfBridge_.isReady()) {
                 std::fill(s.stemAudio.begin(), s.stemAudio.end(), 0.0f);
                 dfBridge_.processStereoChunk(
@@ -242,7 +271,6 @@ private:
                     kChunkSamples,
                     denoiseStrength_.load(std::memory_order_relaxed)
                 );
-                // Residuo rumore su Stem 5 (Other/Noise)
                 const size_t resBase = 5 * kNumChannels * kChunkSamples;
                 for (size_t i = 0; i < kNumChannels * kChunkSamples; ++i) {
                     s.stemAudio[resBase + i] = s.inputAudio[i] - s.stemAudio[i];
@@ -257,7 +285,6 @@ private:
                 std::lock_guard<std::mutex> lk(engineMtx_);
                 if (engine_) {
                     try {
-                        // Costruisci finestra contestuale 7.8s centrata su chunk[idx]
                         std::fill(win48k.begin(), win48k.end(), 0.0f);
                         for (size_t c = 0; c < kNumChannels; ++c) {
                             const size_t dstOff = c * kContext48k;
@@ -273,7 +300,6 @@ private:
                             }
                         }
 
-                        // Resample 48k -> 44.1k
                         const double ratioTo44 = static_cast<double>(kContext48k - 1) / static_cast<double>(kDemucsSamples - 1);
                         for (size_t c = 0; c < kNumChannels; ++c) {
                             const float* src = win48k.data() + c * kContext48k;
@@ -316,23 +342,15 @@ private:
                         };
 
                         if (numOutSources == 6) {
-                            // HTDemucs 6s order: 0:drums, 1:bass, 2:other, 3:vocals, 4:guitar, 5:piano
-                            copyResampledStem(3, 0); // Vocals
-                            copyResampledStem(0, 1); // Drums
-                            copyResampledStem(1, 2); // Bass
-                            copyResampledStem(4, 3); // Guitar
-                            copyResampledStem(5, 4); // Piano
-                            copyResampledStem(2, 5); // Other
+                            copyResampledStem(3, 0); copyResampledStem(0, 1); copyResampledStem(1, 2);
+                            copyResampledStem(4, 3); copyResampledStem(5, 4); copyResampledStem(2, 5);
                             handled = true;
                         } else if (numOutSources == 4) {
-                            // HTDemucs 4s order: 0:drums, 1:bass, 2:other, 3:vocals
-                            copyResampledStem(3, 0); // Vocals
-                            copyResampledStem(0, 1); // Drums
-                            copyResampledStem(1, 2); // Bass
-                            copyResampledStem(2, 5); // Other
+                            copyResampledStem(3, 0); copyResampledStem(0, 1); copyResampledStem(1, 2);
+                            copyResampledStem(2, 5);
                             handled = true;
                         } else if (numOutSources == 1) {
-                            copyResampledStem(0, 0); // Vocals
+                            copyResampledStem(0, 0);
                             const size_t othBase = 5 * kNumChannels * kChunkSamples;
                             for (size_t i = 0; i < kNumChannels * kChunkSamples; ++i) {
                                 s.stemAudio[othBase + i] = s.inputAudio[i] - s.stemAudio[i];
@@ -460,6 +478,8 @@ private:
     std::string loadedModelName_ = "Spectral DSP";
     std::atomic<ModelType> modelType_{ModelType::Music4Stems};
     std::atomic<float> denoiseStrength_{0.7f};
+    std::atomic<float> viewStart_{0.0f};
+    std::atomic<float> viewZoom_{1.0f};
     std::atomic<float> lastMs_{0.0f};
     std::atomic<bool> running_{false};
     std::atomic<bool> hasWork_{false};
@@ -471,4 +491,3 @@ private:
 };
 
 } // namespace OpenPhoton
-

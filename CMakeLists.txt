@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.24)
-project(OpenPhoton VERSION 0.4.0 LANGUAGES CXX)
+project(OpenPhoton VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,6 +25,7 @@ add_library(OpenPhotonCore STATIC
     src/core/DeepFilterBridge.cpp
     src/core/DeepFilterBridge.hpp
     src/core/ModelManager.hpp
+    src/core/DebugLog.hpp
 )
 target_include_directories(OpenPhotonCore PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -66,10 +67,7 @@ if(WIN32)
     add_custom_command(TARGET OpenPhoton POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${ORT_ROOT}/lib/onnxruntime.dll"
-            "${ORT_ROOT}/lib/onnxruntime_providers_shared.dll"
-            "${ORT_ROOT}/lib/onnxruntime_providers_cuda.dll"
+            "${ORT_ROOT}/lib/DirectML.dll"
             "$<TARGET_FILE_DIR:OpenPhoton>"
     )
 endif()
-
-

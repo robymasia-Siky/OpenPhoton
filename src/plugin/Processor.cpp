@@ -45,7 +45,7 @@ void preloadOnnxRuntimeFromPluginDir() {
     if (loaded) return;
     auto dir = getPluginDir();
     if (!dir.empty()) {
-        LoadLibraryW((dir / L"onnxruntime_providers_shared.dll").c_str());
+        LoadLibraryW((dir / L"DirectML.dll").c_str());
         LoadLibraryW((dir / L"onnxruntime.dll").c_str());
         loaded = true;
     }
@@ -85,7 +85,6 @@ Processor::Processor() {
 }
 
 tresult PLUGIN_API Processor::initialize(FUnknown* context) {
-    logTrace("Processor::initialize");
     tresult res = AudioEffect::initialize(context);
     if (res != kResultOk) return res;
 
@@ -95,7 +94,6 @@ tresult PLUGIN_API Processor::initialize(FUnknown* context) {
 }
 
 tresult PLUGIN_API Processor::terminate() {
-    logTrace("Processor::terminate");
     scheduler_.stop();
     return AudioEffect::terminate();
 }
@@ -112,39 +110,37 @@ tresult PLUGIN_API Processor::setBusArrangements(
 }
 
 tresult PLUGIN_API Processor::setupProcessing(ProcessSetup& newSetup) {
-    logTrace("Processor::setupProcessing");
     sampleRate_ = newSetup.sampleRate > 0.0 ? newSetup.sampleRate : 48000.0;
     return AudioEffect::setupProcessing(newSetup);
 }
 
 tresult PLUGIN_API Processor::setActive(TBool state) {
-    logTrace(state ? "Processor::setActive(true) start" : "Processor::setActive(false) start");
     if (state) {
         cache_.preallocateInitialChunks(8);
-        logTrace("Processor::setActive after preallocate");
         preloadOnnxRuntimeFromPluginDir();
-        logTrace("Processor::setActive after preloadOnnx");
         std::wstring modelPath;
         if (const char* env = std::getenv("OPENPHOTON_MODEL")) {
             modelPath = utf8ToWide(env);
         }
         scheduler_.start(getPluginDir(), modelPath);
-        logTrace("Processor::setActive after scheduler.start");
     } else {
+        internalPlaying_.store(false, std::memory_order_release);
         scheduler_.stop();
     }
-    auto res = AudioEffect::setActive(state);
-    logTrace("Processor::setActive end");
-    return res;
+    return AudioEffect::setActive(state);
+}
+
+int64_t Processor::findTotalLoadedSamples() const noexcept {
+    int64_t maxChunks = 1;
+    for (size_t i = 0; i < kMaxChunks; ++i) {
+        if (cache_.slot(i).state.load(std::memory_order_acquire) != ChunkState::Empty) {
+            maxChunks = static_cast<int64_t>(i + 1);
+        }
+    }
+    return maxChunks * static_cast<int64_t>(kChunkSamples);
 }
 
 tresult PLUGIN_API Processor::process(ProcessData& data) {
-    static bool firstProcessLogged = false;
-    if (!firstProcessLogged) {
-        firstProcessLogged = true;
-        logTrace("Processor::process first call");
-    }
-
     if (data.inputParameterChanges) {
         const int32 numParams = data.inputParameterChanges->getParameterCount();
         for (int32 i = 0; i < numParams; ++i) {
@@ -156,7 +152,7 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
             if (count <= 0 || q->getPoint(count - 1, sampleOffset, val) != kResultOk) continue;
 
             const ParamID id = q->getParameterId();
-            if (id == kParamMode) mode_ = static_cast<int>(std::round(val * 2.0));
+            if (id == kParamMode) mode_.store(static_cast<int>(std::round(val * 2.0)), std::memory_order_relaxed);
             else if (id == kParamDryWet) mix_.dryWet = static_cast<float>(val);
             else if (id == kParamModelType) scheduler_.setModelType(static_cast<ModelType>(std::round(val * 3.0)));
             else if (id == kParamDenoiseStrength) scheduler_.setDenoiseStrength(static_cast<float>(val));
@@ -166,8 +162,11 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
                 mix_.mutes[id - kParamVocalsMute] = (val >= 0.5);
             else if (id >= kParamVocalsSolo && id <= kParamOtherSolo)
                 mix_.solos[id - kParamVocalsSolo] = (val >= 0.5);
-            else if (id == kParamClearCache && val >= 0.5)
+            else if (id == kParamClearCache && val >= 0.5) {
+                internalPlaying_.store(false, std::memory_order_release);
+                internalCursor_.store(0, std::memory_order_release);
                 cache_.clearAll();
+            }
         }
     }
 
@@ -184,8 +183,41 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
     float* outL = data.outputs[0].channelBuffers32[0];
     float* outR = (data.outputs[0].numChannels > 1 && data.outputs[0].channelBuffers32[1])
                     ? data.outputs[0].channelBuffers32[1] : nullptr;
-
     if (!inL || !outL) return kResultOk;
+
+    const int mode = mode_.load(std::memory_order_relaxed);
+
+    if (internalPlaying_.load(std::memory_order_acquire)) {
+        const int64_t totalLen = findTotalLoadedSamples();
+        int64_t cur = internalCursor_.load(std::memory_order_relaxed);
+        if (cur >= totalLen) cur = 0;
+
+        scheduler_.notifyPlayhead(cur);
+        scheduler_.wakeWorker();
+
+        for (int32 s = 0; s < data.numSamples; ++s) {
+            int64_t p = cur + s;
+            if (p >= totalLen) p %= totalLen;
+            float mL = 0.0f, mR = 0.0f;
+            if (cache_.readMixedSample(p, mix_, mL, mR)) {
+                outL[s] = mL;
+                if (outR) outR[s] = mR;
+            } else {
+                const size_t cIdx = static_cast<size_t>(p) / kChunkSamples;
+                const size_t loc = static_cast<size_t>(p) % kChunkSamples;
+                if (cIdx < kMaxChunks && cache_.slot(cIdx).allocated.load(std::memory_order_acquire) &&
+                    cache_.slot(cIdx).state.load(std::memory_order_acquire) != ChunkState::Empty) {
+                    outL[s] = cache_.slot(cIdx).inputAudio[loc];
+                    if (outR) outR[s] = cache_.slot(cIdx).inputAudio[kChunkSamples + loc];
+                } else {
+                    outL[s] = 0.0f;
+                    if (outR) outR[s] = 0.0f;
+                }
+            }
+        }
+        internalCursor_.store((cur + data.numSamples) % std::max<int64_t>(1, totalLen), std::memory_order_release);
+        return kResultOk;
+    }
 
     int64_t pos = fallbackCursor_;
     bool playing = true;
@@ -196,7 +228,7 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
         playing = (data.processContext->state & ProcessContext::kPlaying) != 0;
     }
 
-    if (mode_ == 1 && playing) {
+    if (mode == 1 && playing) {
         for (int32 s = 0; s < data.numSamples; ++s) {
             cache_.writeCaptureSample(pos + s, inL[s], inR[s]);
             outL[s] = inL[s];
@@ -204,7 +236,7 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
         }
         scheduler_.notifyPlayhead(pos);
         scheduler_.wakeWorker();
-    } else if (mode_ == 2) {
+    } else if (mode == 2) {
         scheduler_.notifyPlayhead(pos);
         for (int32 s = 0; s < data.numSamples; ++s) {
             float mL = 0.0f, mR = 0.0f;
@@ -231,11 +263,45 @@ tresult PLUGIN_API Processor::notify(IMessage* message) {
     if (!id) return AudioEffect::notify(message);
 
     if (std::strcmp(id, "PollTelemetry") == 0) {
+        double vStart = 0.0, vZoom = 1.0;
+        if (message->getAttributes()->getFloat("vStart", vStart) == kResultOk &&
+            message->getAttributes()->getFloat("vZoom", vZoom) == kResultOk) {
+            scheduler_.setViewWindow(static_cast<float>(vStart), static_cast<float>(vZoom));
+        }
         if (auto reply = Steinberg::owned(allocateMessage())) {
             reply->setMessageID("TelemetryData");
-            auto snap = scheduler_.buildTelemetry();
+            auto snap = scheduler_.buildTelemetry(
+                mode_.load(std::memory_order_relaxed),
+                internalPlaying_.load(std::memory_order_relaxed)
+            );
             reply->getAttributes()->setBinary("data", &snap, sizeof(snap));
             sendMessage(reply);
+        }
+        return kResultOk;
+    }
+
+    if (std::strcmp(id, "InternalPlayToggle") == 0) {
+        const bool next = !internalPlaying_.load(std::memory_order_acquire);
+        if (next) mode_.store(2, std::memory_order_relaxed);
+        internalPlaying_.store(next, std::memory_order_release);
+        return kResultOk;
+    }
+
+    if (std::strcmp(id, "InternalStop") == 0) {
+        internalPlaying_.store(false, std::memory_order_release);
+        internalCursor_.store(0, std::memory_order_release);
+        scheduler_.notifyPlayhead(0);
+        return kResultOk;
+    }
+
+    if (std::strcmp(id, "SeekNormalized") == 0) {
+        double norm = 0.0;
+        if (message->getAttributes()->getFloat("norm", norm) == kResultOk) {
+            const int64_t totalLen = findTotalLoadedSamples();
+            const int64_t target = static_cast<int64_t>(std::clamp(norm, 0.0, 0.999) * static_cast<double>(totalLen));
+            internalCursor_.store(target, std::memory_order_release);
+            scheduler_.notifyPlayhead(target);
+            scheduler_.wakeWorker();
         }
         return kResultOk;
     }
@@ -251,6 +317,9 @@ tresult PLUGIN_API Processor::notify(IMessage* message) {
         if (message->getAttributes()->getString("path", buf, sizeof(buf)) == kResultOk) {
             auto r = loadWavToCache(utf16ToUtf8(buf), cache_, 48000.0);
             if (r.ok) {
+                mode_.store(2, std::memory_order_relaxed);
+                internalCursor_.store(0, std::memory_order_release);
+                internalPlaying_.store(true, std::memory_order_release);
                 scheduler_.notifyPlayhead(0);
                 scheduler_.wakeWorker();
             }

@@ -3,6 +3,7 @@
 #include "public.sdk/source/vst/vstaudioeffect.h"
 #include "core/StemCache.hpp"
 #include "core/ChunkScheduler.hpp"
+#include <atomic>
 
 namespace OpenPhoton {
 
@@ -26,9 +27,13 @@ public:
     Steinberg::tresult PLUGIN_API notify(Steinberg::Vst::IMessage* message) override;
 
 private:
+    int64_t findTotalLoadedSamples() const noexcept;
+
     StemCache cache_;
     ChunkScheduler scheduler_{cache_};
-    int mode_ = 0;
+    std::atomic<int> mode_{0};
+    std::atomic<bool> internalPlaying_{false};
+    std::atomic<int64_t> internalCursor_{0};
     StemMixParams mix_;
     int64_t fallbackCursor_ = 0;
     double sampleRate_ = 48000.0;

@@ -11,11 +11,28 @@ namespace OpenPhoton {
 class STFTProcessor {
 public:
     STFTProcessor(size_t fftSize = 2048, size_t hopSize = 512)
-        : fftSize_(fftSize), hopSize_(hopSize), window_(fftSize, 0.0f)
+        : fftSize_(fftSize), hopSize_(hopSize), window_(fftSize, 0.0f), bitRev_(fftSize, 0)
     {
         for (size_t i = 0; i < fftSize_; ++i) {
             window_[i] = 0.5f * (1.0f - std::cos(2.0f * std::numbers::pi_v<float> *
                          static_cast<float>(i) / static_cast<float>(fftSize_)));
+        }
+        size_t log2n = 0;
+        while ((size_t(1) << log2n) < fftSize_) ++log2n;
+        for (size_t i = 0; i < fftSize_; ++i) {
+            size_t r = 0, x = i;
+            for (size_t b = 0; b < log2n; ++b) {
+                r = (r << 1) | (x & 1);
+                x >>= 1;
+            }
+            bitRev_[i] = r;
+        }
+        twiddleFwd_.resize(fftSize_ / 2);
+        twiddleInv_.resize(fftSize_ / 2);
+        for (size_t k = 0; k < fftSize_ / 2; ++k) {
+            const float ang = -2.0f * std::numbers::pi_v<float> * static_cast<float>(k) / static_cast<float>(fftSize_);
+            twiddleFwd_[k] = { std::cos(ang), std::sin(ang) };
+            twiddleInv_[k] = { std::cos(-ang), std::sin(-ang) };
         }
     }
 
@@ -26,25 +43,19 @@ public:
     void forward(const float* input, size_t numSamples,
                  std::vector<std::complex<float>>& outSpec, size_t& outFrames) const
     {
-        if (numSamples < fftSize_) {
-            outFrames = 0;
-            outSpec.clear();
-            return;
-        }
+        if (numSamples < fftSize_) { outFrames = 0; outSpec.clear(); return; }
         outFrames = (numSamples - fftSize_) / hopSize_ + 1;
         const size_t bins = numBins();
-        outSpec.assign(outFrames * bins, {0.0f, 0.0f});
+        outSpec.resize(outFrames * bins);
 
         std::vector<std::complex<float>> buf(fftSize_);
         for (size_t f = 0; f < outFrames; ++f) {
             const size_t offset = f * hopSize_;
             for (size_t i = 0; i < fftSize_; ++i) {
-                buf[i] = { input[offset + i] * window_[i], 0.0f };
+                buf[bitRev_[i]] = { input[offset + i] * window_[i], 0.0f };
             }
-            fft(buf, false);
-            for (size_t b = 0; b < bins; ++b) {
-                outSpec[f * bins + b] = buf[b];
-            }
+            fftPrecomputed(buf, false);
+            std::copy_n(buf.data(), bins, outSpec.data() + f * bins);
         }
     }
 
@@ -53,62 +64,52 @@ public:
     {
         outAudio.assign(targetSamples, 0.0f);
         std::vector<float> winNorm(targetSamples, 0.0f);
-        std::vector<std::complex<float>> buf(fftSize_);
+        std::vector<std::complex<float>> tmp(fftSize_), buf(fftSize_);
         const size_t bins = numBins();
 
         for (size_t f = 0; f < numFrames; ++f) {
-            for (size_t b = 0; b < bins; ++b) {
-                buf[b] = spec[f * bins + b];
-            }
-            for (size_t b = 1; b < bins - 1; ++b) {
-                buf[fftSize_ - b] = std::conj(buf[b]);
-            }
-            fft(buf, true);
+            const auto* src = spec.data() + f * bins;
+            for (size_t b = 0; b < bins; ++b) tmp[b] = src[b];
+            for (size_t b = 1; b < bins - 1; ++b) tmp[fftSize_ - b] = std::conj(tmp[b]);
+            for (size_t i = 0; i < fftSize_; ++i) buf[bitRev_[i]] = tmp[i];
+
+            fftPrecomputed(buf, true);
 
             const size_t offset = f * hopSize_;
+            const float invN = 1.0f / static_cast<float>(fftSize_);
             for (size_t i = 0; i < fftSize_ && (offset + i) < targetSamples; ++i) {
-                outAudio[offset + i] += buf[i].real() * window_[i];
+                outAudio[offset + i] += buf[i].real() * invN * window_[i];
                 winNorm[offset + i]  += window_[i] * window_[i];
             }
         }
-
         for (size_t i = 0; i < targetSamples; ++i) {
             if (winNorm[i] > 1e-6f) outAudio[i] /= winNorm[i];
         }
     }
 
 private:
-    static void fft(std::vector<std::complex<float>>& a, bool invert) {
-        const size_t n = a.size();
-        for (size_t i = 1, j = 0; i < n; ++i) {
-            size_t bit = n >> 1;
-            for (; j & bit; bit >>= 1) j ^= bit;
-            j ^= bit;
-            if (i < j) std::swap(a[i], a[j]);
-        }
-        for (size_t len = 2; len <= n; len <<= 1) {
-            const float ang = 2.0f * std::numbers::pi_v<float> / static_cast<float>(len) * (invert ? 1.0f : -1.0f);
-            const std::complex<float> wlen(std::cos(ang), std::sin(ang));
-            for (size_t i = 0; i < n; i += len) {
-                std::complex<float> w(1.0f, 0.0f);
-                for (size_t j = 0; j < len / 2; ++j) {
+    void fftPrecomputed(std::vector<std::complex<float>>& a, bool invert) const {
+        const auto& tw = invert ? twiddleInv_ : twiddleFwd_;
+        for (size_t len = 2; len <= fftSize_; len <<= 1) {
+            const size_t half = len >> 1;
+            const size_t step = fftSize_ / len;
+            for (size_t i = 0; i < fftSize_; i += len) {
+                for (size_t j = 0; j < half; ++j) {
                     const auto u = a[i + j];
-                    const auto v = a[i + j + len / 2] * w;
+                    const auto v = a[i + j + half] * tw[j * step];
                     a[i + j] = u + v;
-                    a[i + j + len / 2] = u - v;
-                    w *= wlen;
+                    a[i + j + half] = u - v;
                 }
             }
-        }
-        if (invert) {
-            const float invN = 1.0f / static_cast<float>(n);
-            for (auto& x : a) x *= invN;
         }
     }
 
     size_t fftSize_;
     size_t hopSize_;
     std::vector<float> window_;
+    std::vector<size_t> bitRev_;
+    std::vector<std::complex<float>> twiddleFwd_;
+    std::vector<std::complex<float>> twiddleInv_;
 };
 
 } // namespace OpenPhoton
