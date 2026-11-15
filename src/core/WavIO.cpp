@@ -38,7 +38,7 @@ WavLoadResult loadWavToCache(const std::string& utf8Path, StemCache& cache, doub
 
     const uint64_t maxFramesToRead = std::min<uint64_t>(
         totalFrames,
-        static_cast<uint64_t>(srcRate) * 600ULL
+        static_cast<uint64_t>(srcRate) * 240ULL
     );
 
     std::vector<float> interleaved(static_cast<size_t>(maxFramesToRead) * channels);
@@ -94,6 +94,8 @@ bool exportStemsToFolder(const std::string& folderUtf8, const StemCache& cache, 
         "OpenPhoton_Vocals.wav",
         "OpenPhoton_Drums.wav",
         "OpenPhoton_Bass.wav",
+        "OpenPhoton_Guitar.wav",
+        "OpenPhoton_Piano.wav",
         "OpenPhoton_Other.wav"
     };
 

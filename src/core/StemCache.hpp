@@ -9,10 +9,10 @@
 
 namespace OpenPhoton {
 
-inline constexpr size_t kNumStems = 4;
+inline constexpr size_t kNumStems = 6; // 0:Vocals, 1:Drums, 2:Bass, 3:Guitar, 4:Piano, 5:Other
 inline constexpr size_t kNumChannels = 2;
 inline constexpr size_t kChunkSamples = 48000 * 4;
-inline constexpr size_t kMaxChunks = 150;
+inline constexpr size_t kMaxChunks = 60; // 4 minuti @ 48 kHz
 
 enum class ChunkState : uint8_t {
     Empty = 0,
@@ -22,9 +22,9 @@ enum class ChunkState : uint8_t {
 };
 
 struct StemMixParams {
-    std::array<float, kNumStems> gains{1.0f, 1.0f, 1.0f, 1.0f};
-    std::array<bool, kNumStems> mutes{false, false, false, false};
-    std::array<bool, kNumStems> solos{false, false, false, false};
+    std::array<float, kNumStems> gains{1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    std::array<bool, kNumStems> mutes{false, false, false, false, false, false};
+    std::array<bool, kNumStems> solos{false, false, false, false, false, false};
     float dryWet = 1.0f;
 };
 

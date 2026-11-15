@@ -19,17 +19,20 @@ inline CColor colMuted()   { return CColor(140, 152, 175, 255); }
 
 inline CColor stemColor(int idx) {
     switch (idx) {
-        case 0: return CColor(76, 201, 240, 255);
-        case 1: return CColor(247, 37, 133, 255);
-        case 2: return CColor(247, 127, 0, 255);
-        default: return CColor(128, 237, 153, 255);
+        case 0: return CColor(76, 201, 240, 255);   // Vocals - Cyan
+        case 1: return CColor(247, 37, 133, 255);   // Drums  - Magenta
+        case 2: return CColor(247, 127, 0, 255);    // Bass   - Amber
+        case 3: return CColor(181, 131, 255, 255);  // Guitar - Violet
+        case 4: return CColor(255, 209, 102, 255);  // Piano  - Gold
+        default: return CColor(128, 237, 153, 255); // Other  - Mint
     }
 }
 
 enum ActionTags : int32_t {
     kActionLoadWav = 9001,
     kActionLoadModel = 9002,
-    kActionExportStems = 9003
+    kActionExportStems = 9003,
+    kActionInstallModel = 9004
 };
 
 class PhotonBackdropView : public CView {
@@ -55,21 +58,34 @@ public:
 
         ctx->setFont(kNormalFont, 18, kBoldFace);
         ctx->setFontColor(CColor(76, 201, 240, 255));
-        ctx->drawString("OPEN", CRect(20, 12, 86, 40), kLeftText, true);
+        ctx->drawString("OPEN", CRect(18, 12, 84, 40), kLeftText, true);
         ctx->setFontColor(colText());
-        ctx->drawString("PHOTON", CRect(76, 12, 170, 40), kLeftText, true);
+        ctx->drawString("PHOTON", CRect(74, 12, 168, 40), kLeftText, true);
 
-        char statusBuf[128]{};
-        const char* engineTag = snap_.usingOnnx
-            ? (snap_.usingGpu ? "ONNX CUDA GPU" : "ONNX CPU")
-            : "SPECTRAL DSP";
-        std::snprintf(statusBuf, sizeof(statusBuf), "%s  |  %s  (%.1f ms)",
-                      engineTag,
-                      snap_.modelName[0] ? snap_.modelName : "Built-in",
-                      snap_.lastInferenceMs);
+        char statusBuf[160]{};
+        if (snap_.isDownloading) {
+            std::snprintf(statusBuf, sizeof(statusBuf), "DOWNLOADING AI MODEL: %.0f%% ...", snap_.downloadProgress * 100.0f);
+        } else {
+            const char* engineTag = snap_.usingDeepFilter
+                ? "DEEPFILTERNET 3 AI"
+                : (snap_.usingOnnx ? (snap_.usingGpu ? "ONNX CUDA GPU" : "ONNX CPU") : "SPECTRAL DSP");
+            std::snprintf(statusBuf, sizeof(statusBuf), "%s  |  %s  (%.1f ms)",
+                          engineTag,
+                          snap_.modelName[0] ? snap_.modelName : "Built-in",
+                          snap_.lastInferenceMs);
+        }
         ctx->setFont(kNormalFont, 10, kNormalFace);
-        ctx->setFontColor(snap_.usingGpu ? CColor(128, 237, 153, 255) : colMuted());
-        ctx->drawString(statusBuf, CRect(20, 40, 380, 58), kLeftText, true);
+        ctx->setFontColor((snap_.usingGpu || snap_.usingDeepFilter) ? CColor(128, 237, 153, 255) : colMuted());
+        ctx->drawString(statusBuf, CRect(18, 40, 420, 58), kLeftText, true);
+
+        if (snap_.isDownloading) {
+            CRect pBg(18, 59, 410, 63);
+            ctx->setFillColor(CColor(40, 48, 66, 255));
+            ctx->drawRect(pBg, kDrawFilled);
+            CRect pFill(18, 59, 18 + 392.0 * std::clamp(snap_.downloadProgress, 0.0f, 1.0f), 63);
+            ctx->setFillColor(CColor(76, 201, 240, 255));
+            ctx->drawRect(pFill, kDrawFilled);
+        }
 
         CRect subBar(r.left, r.top + 64, r.right, r.top + 106);
         ctx->setFillColor(CColor(18, 22, 31, 255));
@@ -79,9 +95,9 @@ public:
 
         ctx->setFont(kNormalFont, 10, kBoldFace);
         ctx->setFontColor(colMuted());
-        ctx->drawString("MODEL:", CRect(20, 74, 72, 96), kLeftText, true);
+        ctx->drawString("MODEL:", CRect(18, 74, 68, 96), kLeftText, true);
 
-        CRect waveBox(20, 120, r.right - 20, 326);
+        CRect waveBox(18, 118, r.right - 18, 344);
         ctx->setFillColor(CColor(10, 13, 19, 255));
         ctx->drawRect(waveBox, kDrawFilled);
         ctx->setFrameColor(colBorder());
@@ -107,30 +123,30 @@ public:
             ctx->drawLine(CPoint(x, waveBox.top + 10), CPoint(x, waveBox.bottom - 1));
         }
 
-        const char* labelsMusic[4] = { "VOCALS", "DRUMS", "BASS", "OTHER" };
-        const char* labelsVoice[4] = { "CLEAN",  "---",   "---",  "NOISE" };
-        const bool isVoiceRestore = (snap_.modelType == 2);
-        const CCoord topWave = waveBox.top + 14.0;
-        const CCoord laneH = (waveBox.bottom - topWave - 4.0) / 4.0;
+        const char* labelsMusic[6] = { "VOCALS", "DRUMS", "BASS", "GUITAR", "PIANO", "OTHER" };
+        const char* labelsVoice[6] = { "CLEAN",  "---",   "---",  "---",    "---",   "NOISE" };
+        const bool isVoiceRestore = (snap_.modelType == 3);
+        const CCoord topWave = waveBox.top + 12.0;
+        const CCoord laneH = (waveBox.bottom - topWave - 4.0) / 6.0;
 
-        const CCoord startX = waveBox.left + 80.0;
+        const CCoord startX = waveBox.left + 74.0;
         const CCoord waveW = waveBox.right - 14.0 - startX;
 
-        for (int s = 0; s < 4; ++s) {
+        for (int s = 0; s < 6; ++s) {
             const CCoord midY = topWave + laneH * (s + 0.5);
             const CColor c = stemColor(s);
 
-            ctx->setFont(kNormalFont, 10, kBoldFace);
+            ctx->setFont(kNormalFont, 9, kBoldFace);
             ctx->setFontColor(c);
             ctx->drawString(isVoiceRestore ? labelsVoice[s] : labelsMusic[s],
-                            CRect(waveBox.left + 10, midY - 8, waveBox.left + 74, midY + 8), kLeftText, true);
+                            CRect(waveBox.left + 8, midY - 7, waveBox.left + 70, midY + 7), kLeftText, true);
 
             ctx->setFrameColor(CColor(c.red, c.green, c.blue, 210));
-            ctx->setLineWidth(1.5);
+            ctx->setLineWidth(1.4);
             for (size_t b = 0; b < kTelemetryBins; ++b) {
                 const CCoord x = startX + (waveW * b) / static_cast<double>(kTelemetryBins);
                 const double norm = static_cast<double>(snap_.peaks[s][b]) / 255.0;
-                const double amp = std::max(1.0, norm * (laneH * 0.42));
+                const double amp = std::max(1.0, norm * (laneH * 0.44));
                 ctx->drawLine(CPoint(x, midY - amp), CPoint(x, midY + amp));
             }
         }
@@ -142,8 +158,8 @@ public:
 
         ctx->setFont(kNormalFont, 10, kNormalFace);
         ctx->setFontColor(colMuted());
-        ctx->drawString("Stato chunk: Ambra=Catturato | Magenta=Elaborazione | Ciano=Pronto | Usa 'Load WAV...' o 'Capture & Demix' + Play -> 'Stem Playback'",
-                        CRect(20, r.bottom - 22, r.right - 20, r.bottom - 6), kLeftText, true);
+        ctx->drawString("Seleziona modello e clicca 'Get AI Model' per scaricare HTDemucs (MIT) | Voice Restore usa DeepFilterNet3 AI 48kHz integrato",
+                        CRect(18, r.bottom - 22, r.right - 18, r.bottom - 6), kLeftText, true);
         setDirty(false);
     }
 
@@ -167,8 +183,8 @@ public:
         ctx->setLineWidth(1.0);
         ctx->drawRect(r, kDrawStroked);
 
-        const CRect track(r.left + r.getWidth() * 0.42, r.top + 28,
-                          r.left + r.getWidth() * 0.58, r.bottom - 32);
+        const CRect track(r.left + r.getWidth() * 0.42, r.top + 26,
+                          r.left + r.getWidth() * 0.58, r.bottom - 30);
         ctx->setFillColor(CColor(12, 15, 22, 255));
         ctx->drawRect(track, kDrawFilled);
 
@@ -178,18 +194,18 @@ public:
         ctx->drawRect(CRect(track.left, fillTop, track.right, track.bottom), kDrawFilled);
 
         ctx->setFillColor(colText());
-        ctx->drawRect(CRect(track.left - 7, fillTop - 4, track.right + 7, fillTop + 4), kDrawFilled);
+        ctx->drawRect(CRect(track.left - 6, fillTop - 4, track.right + 6, fillTop + 4), kDrawFilled);
 
         ctx->setFont(kNormalFont, 10, kBoldFace);
         ctx->setFontColor(accent_);
-        ctx->drawString(title_.c_str(), CRect(r.left, r.top + 6, r.right, r.top + 22), kCenterText, true);
+        ctx->drawString(title_.c_str(), CRect(r.left, r.top + 6, r.right, r.top + 20), kCenterText, true);
 
         char buf[32]{};
         const int pct = static_cast<int>(std::round(val * (isPercent200_ ? 200.0f : 100.0f)));
         std::snprintf(buf, sizeof(buf), "%d%%", pct);
-        ctx->setFont(kNormalFont, 11, kNormalFace);
+        ctx->setFont(kNormalFont, 10, kNormalFace);
         ctx->setFontColor(colText());
-        ctx->drawString(buf, CRect(r.left, r.bottom - 24, r.right, r.bottom - 6), kCenterText, true);
+        ctx->drawString(buf, CRect(r.left, r.bottom - 22, r.right, r.bottom - 6), kCenterText, true);
 
         setDirty(false);
     }
@@ -221,8 +237,8 @@ public:
 private:
     void updateFromPoint(const CPoint& where) {
         const CRect r = getViewSize();
-        const CCoord top = r.top + 28;
-        const CCoord bottom = r.bottom - 32;
+        const CCoord top = r.top + 26;
+        const CCoord bottom = r.bottom - 30;
         float v = static_cast<float>((bottom - where.y) / (bottom - top));
         v = std::clamp(v, 0.0f, 1.0f);
         if (v != getValue()) {
@@ -262,7 +278,7 @@ public:
         ctx->setLineWidth(1.0);
         ctx->drawRect(r, kDrawStroked);
 
-        ctx->setFont(kNormalFont, 10, kBoldFace);
+        ctx->setFont(kNormalFont, 9, kBoldFace);
         ctx->setFontColor(active ? CColor(15, 18, 25, 255) : colText());
         ctx->drawString(label_.c_str(), r, kCenterText, true);
         setDirty(false);
@@ -312,7 +328,7 @@ private:
 PhotonEditor::PhotonEditor(Controller* controller)
     : VSTGUIEditor(controller), photonController_(controller)
 {
-    Steinberg::ViewRect vr(0, 0, 960, 580);
+    Steinberg::ViewRect vr(0, 0, 1020, 610);
     setRect(vr);
 }
 
@@ -334,12 +350,13 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
     backdropView_ = backdrop;
     frame->addView(backdrop);
 
+    // Header Row 1: Mode Switcher + Clear Cache
     const char* modeLabels[3] = { "Bypass", "Capture & Demix", "Stem Playback" };
     const float modeVals[3]   = { 0.0f, 0.5f, 1.0f };
     const CColor modeCols[3]  = { CColor(160, 170, 190, 255), CColor(247, 37, 133, 255), CColor(76, 201, 240, 255) };
     for (int m = 0; m < 3; ++m) {
-        const CCoord x = 400 + m * 140;
-        auto* btn = new PhotonButton(CRect(x, 16, x + 134, 48), this, kParamMode + 1000 + m,
+        const CCoord x = 440 + m * 146;
+        auto* btn = new PhotonButton(CRect(x, 16, x + 140, 48), this, kParamMode + 1000 + m,
                                      modeLabels[m], modeCols[m], modeVals[m], false);
         const float curMode = static_cast<float>(controller->getParamNormalized(kParamMode));
         btn->setSelected(std::abs(curMode - modeVals[m]) < 0.2f);
@@ -347,59 +364,64 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
         controls_[kParamMode + 1000 + m] = btn;
     }
 
-    auto* clearBtn = new PhotonButton(CRect(832, 16, 940, 48), this, kParamClearCache,
+    auto* clearBtn = new PhotonButton(CRect(890, 16, 1002, 48), this, kParamClearCache,
                                       "Clear Cache", CColor(247, 127, 0, 255), 1.0f, false, true);
     frame->addView(clearBtn);
     controls_[kParamClearCache] = clearBtn;
 
-    const char* modelLabels[3] = { "Music 4 Stems", "Voice 2 Stems", "Voice Restore" };
-    for (int k = 0; k < 3; ++k) {
-        const CCoord x = 76 + k * 124;
-        auto* btn = new PhotonButton(CRect(x, 72, x + 118, 98), this, kParamModelType + 2000 + k,
-                                     modelLabels[k], CColor(128, 237, 153, 255), modeVals[k], false);
+    // Header Row 2: 4 Modelli AI + Get AI Model + WAV/ONNX/Export
+    const char* modelLabels[4] = { "Music 4-Stem", "Music 6-Stem", "Voice 2-Stem", "Voice Restore" };
+    const float modelVals[4]   = { 0.0f, 1.0f / 3.0f, 2.0f / 3.0f, 1.0f };
+    for (int k = 0; k < 4; ++k) {
+        const CCoord x = 70 + k * 108;
+        auto* btn = new PhotonButton(CRect(x, 72, x + 102, 98), this, kParamModelType + 2000 + k,
+                                     modelLabels[k], CColor(128, 237, 153, 255), modelVals[k], false);
         const float curMod = static_cast<float>(controller->getParamNormalized(kParamModelType));
-        btn->setSelected(std::abs(curMod - modeVals[k]) < 0.2f);
+        btn->setSelected(std::abs(curMod - modelVals[k]) < 0.15f);
         frame->addView(btn);
         controls_[kParamModelType + 2000 + k] = btn;
     }
 
-    frame->addView(new PhotonButton(CRect(530, 72, 650, 98), this, kActionLoadWav,
+    frame->addView(new PhotonButton(CRect(520, 72, 636, 98), this, kActionInstallModel,
+                                    "Get AI Model", CColor(255, 209, 102, 255), 1.0f, false, true));
+    frame->addView(new PhotonButton(CRect(644, 72, 756, 98), this, kActionLoadWav,
                                     "Load WAV...", CColor(76, 201, 240, 255), 1.0f, false, true));
-    frame->addView(new PhotonButton(CRect(660, 72, 790, 98), this, kActionLoadModel,
-                                    "Load .onnx...", CColor(180, 140, 255, 255), 1.0f, false, true));
-    frame->addView(new PhotonButton(CRect(800, 72, 940, 98), this, kActionExportStems,
+    frame->addView(new PhotonButton(CRect(764, 72, 876, 98), this, kActionLoadModel,
+                                    "Load .onnx...", CColor(181, 131, 255, 255), 1.0f, false, true));
+    frame->addView(new PhotonButton(CRect(884, 72, 1002, 98), this, kActionExportStems,
                                     "Export WAVs...", CColor(128, 237, 153, 255), 1.0f, false, true));
 
-    const char* stemTitles[4] = { "VOCALS", "DRUMS", "BASS", "OTHER" };
-    for (int i = 0; i < 4; ++i) {
-        const CCoord x = 20 + i * 156;
+    // Bottom Mixer: 6 Stems + Strength + Dry/Wet (8 colonne da 116px)
+    const char* stemTitles[6] = { "VOCALS", "DRUMS", "BASS", "GUITAR", "PIANO", "OTHER" };
+    for (int i = 0; i < 6; ++i) {
+        const CCoord x = 18 + i * 124;
         const CColor c = stemColor(i);
 
-        auto* slider = new PhotonSlider(CRect(x, 340, x + 144, 502), this, kParamVocalsGain + i, c, stemTitles[i], true);
+        auto* slider = new PhotonSlider(CRect(x, 358, x + 114, 534), this, kParamVocalsGain + i, c, stemTitles[i], true);
         slider->setValue(static_cast<float>(controller->getParamNormalized(kParamVocalsGain + i)));
         frame->addView(slider);
         controls_[kParamVocalsGain + i] = slider;
 
-        auto* muteBtn = new PhotonButton(CRect(x, 510, x + 68, 540), this, kParamVocalsMute + i,
-                                         "MUTE", CColor(239, 71, 111, 255), 1.0f, true);
+        auto* muteBtn = new PhotonButton(CRect(x, 542, x + 54, 572), this, kParamVocalsMute + i,
+                                         "M", CColor(239, 71, 111, 255), 1.0f, true);
         muteBtn->setValue(static_cast<float>(controller->getParamNormalized(kParamVocalsMute + i)));
         frame->addView(muteBtn);
         controls_[kParamVocalsMute + i] = muteBtn;
 
-        auto* soloBtn = new PhotonButton(CRect(x + 76, 510, x + 144, 540), this, kParamVocalsSolo + i,
-                                         "SOLO", CColor(255, 209, 102, 255), 1.0f, true);
+        auto* soloBtn = new PhotonButton(CRect(x + 60, 542, x + 114, 572), this, kParamVocalsSolo + i,
+                                         "S", CColor(255, 209, 102, 255), 1.0f, true);
         soloBtn->setValue(static_cast<float>(controller->getParamNormalized(kParamVocalsSolo + i)));
         frame->addView(soloBtn);
         controls_[kParamVocalsSolo + i] = soloBtn;
     }
 
-    auto* strength = new PhotonSlider(CRect(652, 340, 790, 540), this, kParamDenoiseStrength,
-                                      CColor(180, 140, 255, 255), "STRENGTH", false);
+    auto* strength = new PhotonSlider(CRect(768, 358, 880, 572), this, kParamDenoiseStrength,
+                                      CColor(181, 131, 255, 255), "STRENGTH", false);
     strength->setValue(static_cast<float>(controller->getParamNormalized(kParamDenoiseStrength)));
     frame->addView(strength);
     controls_[kParamDenoiseStrength] = strength;
 
-    auto* dryWet = new PhotonSlider(CRect(802, 340, 940, 540), this, kParamDryWet,
+    auto* dryWet = new PhotonSlider(CRect(890, 358, 1002, 572), this, kParamDryWet,
                                     CColor(120, 160, 255, 255), "DRY / WET", false);
     dryWet->setValue(static_cast<float>(controller->getParamNormalized(kParamDryWet)));
     frame->addView(dryWet);
@@ -447,7 +469,7 @@ void PhotonEditor::openFileAction(int actionTag) {
             sel->setTitle("Seleziona modello neurale ONNX");
             sel->addFileExtension(CFileExtension("ONNX Model", "onnx"));
         } else {
-            sel->setTitle("Scegli cartella per esportare i 4 Stem WAV");
+            sel->setTitle("Scegli cartella per esportare i 6 Stem WAV");
         }
 
         sel->run([this, actionTag](CNewFileSelector* s) {
@@ -469,6 +491,13 @@ void PhotonEditor::valueChanged(CControl* pControl) {
     if (!pControl || !controller) return;
     const int32_t tag = pControl->getTag();
 
+    if (tag == kActionInstallModel) {
+        if (pControl->getValue() >= 0.5f && photonController_) {
+            photonController_->sendCommandMessage("InstallModel");
+        }
+        return;
+    }
+
     if (tag == kActionLoadWav || tag == kActionLoadModel || tag == kActionExportStems) {
         if (pControl->getValue() >= 0.5f) {
             openFileAction(tag);
@@ -479,7 +508,7 @@ void PhotonEditor::valueChanged(CControl* pControl) {
     Steinberg::Vst::ParamID paramId = static_cast<Steinberg::Vst::ParamID>(tag);
     if (tag >= kParamMode + 1000 && tag <= kParamMode + 1002) {
         paramId = kParamMode;
-    } else if (tag >= kParamModelType + 2000 && tag <= kParamModelType + 2002) {
+    } else if (tag >= kParamModelType + 2000 && tag <= kParamModelType + 2003) {
         paramId = kParamModelType;
     }
 
@@ -496,13 +525,23 @@ void PhotonEditor::valueChanged(CControl* pControl) {
 
 void PhotonEditor::syncParameterToUI(Steinberg::Vst::ParamID tag, Steinberg::Vst::ParamValue value) {
     if (!frame) return;
-    if (tag == kParamMode || tag == kParamModelType) {
+    if (tag == kParamMode) {
         const float vals[3] = { 0.0f, 0.5f, 1.0f };
-        const int32_t baseTag = (tag == kParamMode) ? (kParamMode + 1000) : (kParamModelType + 2000);
         for (int m = 0; m < 3; ++m) {
-            if (auto it = controls_.find(baseTag + m); it != controls_.end()) {
+            if (auto it = controls_.find(kParamMode + 1000 + m); it != controls_.end()) {
                 if (auto* btn = dynamic_cast<PhotonButton*>(it->second)) {
                     btn->setSelected(std::abs(static_cast<float>(value) - vals[m]) < 0.2f);
+                }
+            }
+        }
+        return;
+    }
+    if (tag == kParamModelType) {
+        const float vals[4] = { 0.0f, 1.0f / 3.0f, 2.0f / 3.0f, 1.0f };
+        for (int m = 0; m < 4; ++m) {
+            if (auto it = controls_.find(kParamModelType + 2000 + m); it != controls_.end()) {
+                if (auto* btn = dynamic_cast<PhotonButton*>(it->second)) {
+                    btn->setSelected(std::abs(static_cast<float>(value) - vals[m]) < 0.15f);
                 }
             }
         }

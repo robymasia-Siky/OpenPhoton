@@ -11,7 +11,7 @@ OnnxEngine::OnnxEngine(const std::wstring& modelPath,
       memoryInfo_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault))
 {
     sessionOptions_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-    sessionOptions_.SetIntraOpNumThreads(1);
+    sessionOptions_.SetIntraOpNumThreads(2);
 
     bool cudaAttached = false;
     if (backend == ExecutionBackend::Auto || backend == ExecutionBackend::CUDA) {
@@ -19,7 +19,7 @@ OnnxEngine::OnnxEngine(const std::wstring& modelPath,
             OrtCUDAProviderOptions cudaOpts{};
             cudaOpts.device_id = gpuDeviceId;
             cudaOpts.arena_extend_strategy = 0;
-            cudaOpts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+            cudaOpts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchHeuristic;
             cudaOpts.do_copy_in_default_stream = 1;
 
             sessionOptions_.AppendExecutionProvider_CUDA(cudaOpts);

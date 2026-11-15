@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.24)
-project(OpenPhoton VERSION 0.3.0 LANGUAGES CXX)
+project(OpenPhoton VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,8 @@ add_library(OpenPhotonCore STATIC
     src/core/Telemetry.hpp
     src/core/WavIO.cpp
     src/core/WavIO.hpp
+    src/core/DeepFilterBridge.hpp
+    src/core/ModelManager.hpp
 )
 target_include_directories(OpenPhotonCore PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -57,7 +59,7 @@ target_link_libraries(OpenPhoton PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(OpenPhoton PRIVATE delayimp)
+    target_link_libraries(OpenPhoton PRIVATE delayimp winhttp)
     target_link_options(OpenPhoton PRIVATE "/DELAYLOAD:onnxruntime.dll")
     add_custom_command(TARGET OpenPhoton POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

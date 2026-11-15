@@ -23,6 +23,13 @@ jobs:
           Rename-Item "third_party/onnxruntime-win-x64-gpu-$OrtVer" "onnxruntime"
           Remove-Item ort.zip -Force
 
+      - name: Build DeepFilterNet3 Native C-API (df.dll)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/Rikorose/DeepFilterNet.git third_party/DeepFilterNet
+          cargo build --release --manifest-path third_party/DeepFilterNet/Cargo.toml -p deep_filter --features "capi,default-model,tract"
+
       - name: Configure CMake
         run: cmake -B build -G "Visual Studio 17 2022" -A x64
 
@@ -34,6 +41,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item -Recurse -Force "build/VST3/Release/OpenPhoton.vst3" "dist/OpenPhoton.vst3"
+          $winDir = "dist/OpenPhoton.vst3/Contents/x86_64-win"
+          $dfDll = "third_party/DeepFilterNet/target/release/df.dll"
+          $dfModel = "third_party/DeepFilterNet/models/DeepFilterNet3_onnx.tar.gz"
+          if (Test-Path $dfDll) { Copy-Item -Force $dfDll $winDir }
+          if (Test-Path $dfModel) { Copy-Item -Force $dfModel $winDir }
 
       - name: Upload OpenPhoton.vst3 Artifact
         uses: actions/upload-artifact@v6

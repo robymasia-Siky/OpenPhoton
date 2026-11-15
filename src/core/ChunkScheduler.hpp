@@ -4,6 +4,8 @@
 #include "OnnxEngine.hpp"
 #include "STFTProcessor.hpp"
 #include "Telemetry.hpp"
+#include "DeepFilterBridge.hpp"
+#include "ModelManager.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -21,8 +23,9 @@ namespace OpenPhoton {
 
 enum class ModelType : uint8_t {
     Music4Stems = 0,
-    Voice2Stems = 1,
-    VoiceRestore = 2
+    Music6Stems = 1,
+    Voice2Stems = 2,
+    VoiceRestore = 3
 };
 
 class ChunkScheduler {
@@ -30,9 +33,16 @@ public:
     explicit ChunkScheduler(StemCache& cache) : cache_(cache) {}
     ~ChunkScheduler() { stop(); }
 
-    void start(const std::wstring& onnxModelPath) {
+    void start(const std::filesystem::path& pluginDir, const std::wstring& customOnnxPath) {
         stop();
-        attachModel(onnxModelPath);
+        pluginDir_ = pluginDir;
+        dfBridge_.init(pluginDir_);
+
+        if (!customOnnxPath.empty()) {
+            attachModel(customOnnxPath);
+        } else {
+            autoSwitchModelForPreset(modelType_.load(std::memory_order_relaxed));
+        }
         running_.store(true, std::memory_order_release);
         worker_ = std::thread(&ChunkScheduler::workerLoop, this);
     }
@@ -43,16 +53,31 @@ public:
         wakeWorker();
     }
 
+    void installSelectedModel() {
+        const int id = static_cast<int>(modelType_.load(std::memory_order_relaxed));
+        if (id < 0 || id > 2) return;
+        modelManager_.startDownload(id, [this](std::wstring downloadedPath) {
+            attachModel(downloadedPath);
+            cache_.markAllCapturedForReprocess();
+            wakeWorker();
+        });
+    }
+
     void stop() {
+        modelManager_.cancelAndJoin();
         running_.store(false, std::memory_order_release);
         cv_.notify_all();
         if (worker_.joinable()) worker_.join();
-        std::lock_guard<std::mutex> lk(engineMtx_);
-        engine_.reset();
+        {
+            std::lock_guard<std::mutex> lk(engineMtx_);
+            engine_.reset();
+        }
+        dfBridge_.unload();
     }
 
     void setModelType(ModelType t) {
         if (modelType_.exchange(t, std::memory_order_acq_rel) != t) {
+            autoSwitchModelForPreset(t);
             cache_.markAllCapturedForReprocess();
             wakeWorker();
         }
@@ -93,13 +118,25 @@ public:
             ? static_cast<float>(std::clamp(static_cast<double>(playheadSample_.load(std::memory_order_relaxed)) / totalSamples, 0.0, 1.0))
             : 0.0f;
         snap.lastInferenceMs = lastMs_.load(std::memory_order_relaxed);
-        snap.modelType = static_cast<uint8_t>(modelType_.load(std::memory_order_relaxed));
+
+        const auto mt = modelType_.load(std::memory_order_relaxed);
+        snap.modelType = static_cast<uint8_t>(mt);
+        snap.isDownloading = modelManager_.isDownloading() ? 1 : 0;
+        snap.downloadProgress = modelManager_.progress();
+        snap.usingDeepFilter = (mt == ModelType::VoiceRestore && dfBridge_.isReady()) ? 1 : 0;
+        snap.modelInstalled = (mt == ModelType::VoiceRestore)
+            ? (dfBridge_.isReady() ? 1 : 0)
+            : (ModelManager::isModelInstalled(static_cast<int>(mt)) ? 1 : 0);
 
         {
             std::lock_guard<std::mutex> lk(engineMtx_);
             snap.usingOnnx = engine_ ? 1 : 0;
             snap.usingGpu = (engine_ && engine_->activeProvider() == "CUDA") ? 1 : 0;
-            std::strncpy(snap.modelName, loadedModelName_.c_str(), sizeof(snap.modelName) - 1);
+            if (mt == ModelType::VoiceRestore && dfBridge_.isReady()) {
+                std::strncpy(snap.modelName, "DeepFilterNet3 AI (48kHz)", sizeof(snap.modelName) - 1);
+            } else {
+                std::strncpy(snap.modelName, loadedModelName_.c_str(), sizeof(snap.modelName) - 1);
+            }
         }
 
         for (size_t b = 0; b < kTelemetryBins; ++b) {
@@ -115,10 +152,23 @@ public:
     }
 
 private:
+    void autoSwitchModelForPreset(ModelType t) {
+        const int id = static_cast<int>(t);
+        if (id >= 0 && id <= 2 && ModelManager::isModelInstalled(id)) {
+            attachModel(ModelManager::getModelPath(id).wstring());
+        } else {
+            std::lock_guard<std::mutex> lk(engineMtx_);
+            engine_.reset();
+            loadedModelName_ = (t == ModelType::VoiceRestore)
+                ? (dfBridge_.isReady() ? "DeepFilterNet3 AI" : "Spectral Wiener Denoise")
+                : "Spectral DSP (Click Get AI Model)";
+        }
+    }
+
     void attachModel(const std::wstring& onnxModelPath) {
         std::lock_guard<std::mutex> lk(engineMtx_);
         engine_.reset();
-        loadedModelName_ = "Spectral DSP (Built-in)";
+        loadedModelName_ = "Spectral DSP";
         if (!onnxModelPath.empty()) {
             try {
                 engine_ = std::make_unique<OnnxEngine>(onnxModelPath, ExecutionBackend::Auto, 0);
@@ -127,7 +177,7 @@ private:
                                         std::min<size_t>(u8.size(), 60));
             } catch (...) {
                 engine_.reset();
-                loadedModelName_ = "Spectral DSP (ONNX Load Failed)";
+                loadedModelName_ = "ONNX Load Failed";
             }
         }
     }
@@ -154,6 +204,13 @@ private:
         std::vector<int64_t> outShape;
         STFTProcessor stft(2048, 512);
 
+        // HTDemucs ONNX contract: 7.8s @ 44.1 kHz = 343980 samples
+        constexpr size_t kDemucsSamples = 343980;
+        constexpr size_t kContext48k = 374400; // 7.8s @ 48 kHz
+        constexpr size_t kPad48k = (kContext48k - kChunkSamples) / 2; // 1.9s = 91200 samples
+        std::vector<float> win48k(kNumChannels * kContext48k, 0.0f);
+        std::vector<float> in44k(kNumChannels * kDemucsSamples, 0.0f);
+
         while (running_.load(std::memory_order_acquire)) {
             const size_t idx = findBestChunkToProcess();
             if (idx >= kMaxChunks) {
@@ -169,37 +226,125 @@ private:
             s.state.store(ChunkState::Computing, std::memory_order_release);
 
             const auto t0 = std::chrono::steady_clock::now();
-            bool onnxHandled = false;
+            const auto mode = modelType_.load(std::memory_order_relaxed);
+            bool handled = false;
 
-            {
+            if (mode == ModelType::VoiceRestore && dfBridge_.isReady()) {
+                std::fill(s.stemAudio.begin(), s.stemAudio.end(), 0.0f);
+                dfBridge_.processStereoChunk(
+                    s.inputAudio.data(),
+                    s.inputAudio.data() + kChunkSamples,
+                    s.stemAudio.data(),
+                    s.stemAudio.data() + kChunkSamples,
+                    kChunkSamples,
+                    denoiseStrength_.load(std::memory_order_relaxed)
+                );
+                // Residuo rumore su Stem 5 (Other/Noise)
+                const size_t resBase = 5 * kNumChannels * kChunkSamples;
+                for (size_t i = 0; i < kNumChannels * kChunkSamples; ++i) {
+                    s.stemAudio[resBase + i] = s.inputAudio[i] - s.stemAudio[i];
+                }
+                const auto t1 = std::chrono::steady_clock::now();
+                lastMs_.store(static_cast<float>(std::chrono::duration<double, std::milli>(t1 - t0).count()),
+                              std::memory_order_relaxed);
+                handled = true;
+            }
+
+            if (!handled && mode != ModelType::VoiceRestore) {
                 std::lock_guard<std::mutex> lk(engineMtx_);
                 if (engine_) {
                     try {
-                        const std::vector<int64_t> inShape = {1, static_cast<int64_t>(kNumChannels),
-                                                              static_cast<int64_t>(kChunkSamples)};
-                        auto stats = engine_->runAudioChunk(s.inputAudio.data(), inShape, outBuf, outShape);
-                        if (outBuf.size() >= s.stemAudio.size()) {
-                            std::copy_n(outBuf.data(), s.stemAudio.size(), s.stemAudio.data());
-                            onnxHandled = true;
-                        } else if (outBuf.size() >= kNumChannels * kChunkSamples) {
-                            std::fill(s.stemAudio.begin(), s.stemAudio.end(), 0.0f);
-                            std::copy_n(outBuf.data(), kNumChannels * kChunkSamples, s.stemAudio.data());
-                            const size_t resBase = 3 * kNumChannels * kChunkSamples;
-                            for (size_t i = 0; i < kNumChannels * kChunkSamples; ++i) {
-                                s.stemAudio[resBase + i] = s.inputAudio[i] - outBuf[i];
+                        // Costruisci finestra contestuale 7.8s centrata su chunk[idx]
+                        std::fill(win48k.begin(), win48k.end(), 0.0f);
+                        for (size_t c = 0; c < kNumChannels; ++c) {
+                            const size_t dstOff = c * kContext48k;
+                            const size_t srcOff = c * kChunkSamples;
+                            if (idx > 0 && cache_.slot(idx - 1).state.load(std::memory_order_acquire) != ChunkState::Empty) {
+                                std::copy_n(cache_.slot(idx - 1).inputAudio.data() + srcOff + (kChunkSamples - kPad48k),
+                                            kPad48k, win48k.data() + dstOff);
                             }
-                            onnxHandled = true;
+                            std::copy_n(s.inputAudio.data() + srcOff, kChunkSamples, win48k.data() + dstOff + kPad48k);
+                            if (idx + 1 < kMaxChunks && cache_.slot(idx + 1).state.load(std::memory_order_acquire) != ChunkState::Empty) {
+                                std::copy_n(cache_.slot(idx + 1).inputAudio.data() + srcOff,
+                                            kPad48k, win48k.data() + dstOff + kPad48k + kChunkSamples);
+                            }
+                        }
+
+                        // Resample 48k -> 44.1k
+                        const double ratioTo44 = static_cast<double>(kContext48k - 1) / static_cast<double>(kDemucsSamples - 1);
+                        for (size_t c = 0; c < kNumChannels; ++c) {
+                            const float* src = win48k.data() + c * kContext48k;
+                            float* dst = in44k.data() + c * kDemucsSamples;
+                            for (size_t i = 0; i < kDemucsSamples; ++i) {
+                                const double p = static_cast<double>(i) * ratioTo44;
+                                const size_t i0 = static_cast<size_t>(p);
+                                const size_t i1 = std::min<size_t>(i0 + 1, kContext48k - 1);
+                                const float frac = static_cast<float>(p - static_cast<double>(i0));
+                                dst[i] = src[i0] + (src[i1] - src[i0]) * frac;
+                            }
+                        }
+
+                        const std::vector<int64_t> inShape = {1, static_cast<int64_t>(kNumChannels),
+                                                              static_cast<int64_t>(kDemucsSamples)};
+                        auto stats = engine_->runAudioChunk(in44k.data(), inShape, outBuf, outShape);
+
+                        const size_t numOutSources = (outShape.size() >= 2 && outShape[1] > 0)
+                            ? static_cast<size_t>(outShape[1])
+                            : (outBuf.size() / (kNumChannels * kDemucsSamples));
+
+                        std::fill(s.stemAudio.begin(), s.stemAudio.end(), 0.0f);
+                        const double centerStart44 = static_cast<double>(kPad48k) / ratioTo44;
+                        const double ratioTo48 = static_cast<double>(kDemucsSamples - 1) / static_cast<double>(kContext48k - 1);
+
+                        auto copyResampledStem = [&](size_t srcStemIdx, size_t dstStemIdx) {
+                            const float* srcBase = outBuf.data() + srcStemIdx * kNumChannels * kDemucsSamples;
+                            float* dstBase = s.stemAudio.data() + dstStemIdx * kNumChannels * kChunkSamples;
+                            for (size_t c = 0; c < kNumChannels; ++c) {
+                                const float* src = srcBase + c * kDemucsSamples;
+                                float* dst = dstBase + c * kChunkSamples;
+                                for (size_t i = 0; i < kChunkSamples; ++i) {
+                                    const double p = centerStart44 + static_cast<double>(i) * ratioTo48;
+                                    const size_t i0 = std::min<size_t>(static_cast<size_t>(p), kDemucsSamples - 1);
+                                    const size_t i1 = std::min<size_t>(i0 + 1, kDemucsSamples - 1);
+                                    const float frac = static_cast<float>(p - static_cast<double>(i0));
+                                    dst[i] = src[i0] + (src[i1] - src[i0]) * frac;
+                                }
+                            }
+                        };
+
+                        if (numOutSources == 6) {
+                            // HTDemucs 6s order: 0:drums, 1:bass, 2:other, 3:vocals, 4:guitar, 5:piano
+                            copyResampledStem(3, 0); // Vocals
+                            copyResampledStem(0, 1); // Drums
+                            copyResampledStem(1, 2); // Bass
+                            copyResampledStem(4, 3); // Guitar
+                            copyResampledStem(5, 4); // Piano
+                            copyResampledStem(2, 5); // Other
+                            handled = true;
+                        } else if (numOutSources == 4) {
+                            // HTDemucs 4s order: 0:drums, 1:bass, 2:other, 3:vocals
+                            copyResampledStem(3, 0); // Vocals
+                            copyResampledStem(0, 1); // Drums
+                            copyResampledStem(1, 2); // Bass
+                            copyResampledStem(2, 5); // Other
+                            handled = true;
+                        } else if (numOutSources == 1) {
+                            copyResampledStem(0, 0); // Vocals
+                            const size_t othBase = 5 * kNumChannels * kChunkSamples;
+                            for (size_t i = 0; i < kNumChannels * kChunkSamples; ++i) {
+                                s.stemAudio[othBase + i] = s.inputAudio[i] - s.stemAudio[i];
+                            }
+                            handled = true;
                         }
                         lastMs_.store(static_cast<float>(stats.inferenceMs), std::memory_order_relaxed);
                     } catch (...) {
-                        onnxHandled = false;
+                        handled = false;
                     }
                 }
             }
 
-            if (!onnxHandled) {
-                runSpectralDSP(stft, s, modelType_.load(std::memory_order_relaxed),
-                               denoiseStrength_.load(std::memory_order_relaxed));
+            if (!handled) {
+                runSpectralDSP(stft, s, mode, denoiseStrength_.load(std::memory_order_relaxed));
                 const auto t1 = std::chrono::steady_clock::now();
                 lastMs_.store(static_cast<float>(std::chrono::duration<double, std::milli>(t1 - t0).count()),
                               std::memory_order_relaxed);
@@ -232,8 +377,7 @@ private:
         if (mode == ModelType::VoiceRestore) {
             std::vector<float> noiseEst(bins, 1e9f);
             for (size_t b = 0; b < bins; ++b) {
-                float minMag = 1e9f;
-                float avgMag = 0.0f;
+                float minMag = 1e9f, avgMag = 0.0f;
                 for (size_t f = 0; f < frames; ++f) {
                     const float m = 0.5f * (std::abs(specL[f * bins + b]) + std::abs(specR[f * bins + b]));
                     minMag = std::min(minMag, m);
@@ -242,23 +386,17 @@ private:
                 avgMag /= static_cast<float>(frames);
                 noiseEst[b] = minMag * 1.4f + avgMag * 0.05f;
             }
-
             const float alpha = 0.5f + strength * 3.5f;
             const float floorGain = 1.0f - strength * 0.94f;
-
             for (size_t f = 0; f < frames; ++f) {
                 for (size_t b = 0; b < bins; ++b) {
                     const size_t idx = f * bins + b;
-                    const float pL = std::norm(specL[idx]);
-                    const float pR = std::norm(specR[idx]);
+                    const float pL = std::norm(specL[idx]), pR = std::norm(specR[idx]);
                     const float nP = noiseEst[b] * noiseEst[b] * alpha;
                     const float gL = std::max(floorGain, (pL - nP) / (pL + 1e-9f));
                     const float gR = std::max(floorGain, (pR - nP) / (pR + 1e-9f));
-
-                    outL[0][idx] = specL[idx] * gL;
-                    outR[0][idx] = specR[idx] * gR;
-                    outL[3][idx] = specL[idx] * (1.0f - gL);
-                    outR[3][idx] = specR[idx] * (1.0f - gR);
+                    outL[0][idx] = specL[idx] * gL; outR[0][idx] = specR[idx] * gR;
+                    outL[5][idx] = specL[idx] * (1.0f - gL); outR[5][idx] = specR[idx] * (1.0f - gR);
                 }
             }
         } else {
@@ -267,15 +405,9 @@ private:
                 for (size_t b = 0; b < bins; ++b) {
                     const size_t idx = f * bins + b;
                     const float freq = static_cast<float>(b) * binHz;
-                    const auto L = specL[idx];
-                    const auto R = specR[idx];
-                    const auto Mid = 0.5f * (L + R);
-                    const auto Side = 0.5f * (L - R);
-
-                    const float mMag = std::abs(Mid);
-                    const float sMag = std::abs(Side);
+                    const auto L = specL[idx], R = specR[idx];
+                    const float mMag = std::abs(0.5f * (L + R)), sMag = std::abs(0.5f * (L - R));
                     const float centerRatio = mMag / (mMag + sMag + 1e-7f);
-
                     const float energy = std::norm(L) + std::norm(R);
                     const float flux = std::max(0.0f, energy - prevEnergy[b]) / (energy + 1e-7f);
                     prevEnergy[b] = energy * 0.6f + prevEnergy[b] * 0.4f;
@@ -298,11 +430,10 @@ private:
                             wOth = 1.0f - wDrm;
                         }
                     }
-
                     outL[0][idx] = L * wVoc; outR[0][idx] = R * wVoc;
                     outL[1][idx] = L * wDrm; outR[1][idx] = R * wDrm;
                     outL[2][idx] = L * wBas; outR[2][idx] = R * wBas;
-                    outL[3][idx] = L * wOth; outR[3][idx] = R * wOth;
+                    outL[5][idx] = L * wOth; outR[5][idx] = R * wOth;
                 }
             }
         }
@@ -318,9 +449,12 @@ private:
     }
 
     StemCache& cache_;
+    std::filesystem::path pluginDir_;
+    DeepFilterBridge dfBridge_;
+    ModelManager modelManager_;
     mutable std::mutex engineMtx_;
     std::unique_ptr<OnnxEngine> engine_;
-    std::string loadedModelName_ = "Spectral DSP (Built-in)";
+    std::string loadedModelName_ = "Spectral DSP";
     std::atomic<ModelType> modelType_{ModelType::Music4Stems};
     std::atomic<float> denoiseStrength_{0.7f};
     std::atomic<float> lastMs_{0.0f};

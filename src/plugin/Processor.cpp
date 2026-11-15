@@ -18,18 +18,27 @@ using namespace Steinberg;
 using namespace Steinberg::Vst;
 
 namespace {
+std::filesystem::path getPluginDir() {
+#ifdef _WIN32
+    HMODULE hMod = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&getPluginDir),
+                           &hMod)) {
+        wchar_t pathBuf[MAX_PATH]{};
+        GetModuleFileNameW(hMod, pathBuf, MAX_PATH);
+        return std::filesystem::path(pathBuf).parent_path();
+    }
+#endif
+    return {};
+}
+
 void preloadOnnxRuntimeFromPluginDir() {
 #ifdef _WIN32
     static bool loaded = false;
     if (loaded) return;
-    HMODULE hMod = nullptr;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&preloadOnnxRuntimeFromPluginDir),
-                           &hMod)) {
-        wchar_t pathBuf[MAX_PATH]{};
-        GetModuleFileNameW(hMod, pathBuf, MAX_PATH);
-        auto dir = std::filesystem::path(pathBuf).parent_path();
+    auto dir = getPluginDir();
+    if (!dir.empty()) {
         LoadLibraryW((dir / L"onnxruntime_providers_shared.dll").c_str());
         LoadLibraryW((dir / L"onnxruntime.dll").c_str());
         loaded = true;
@@ -106,7 +115,7 @@ tresult PLUGIN_API Processor::setActive(TBool state) {
         if (const char* env = std::getenv("OPENPHOTON_MODEL")) {
             modelPath = utf8ToWide(env);
         }
-        scheduler_.start(modelPath);
+        scheduler_.start(getPluginDir(), modelPath);
     } else {
         scheduler_.stop();
     }
@@ -126,7 +135,7 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
             const ParamID id = q->getParameterId();
             if (id == kParamMode) mode_ = static_cast<int>(std::round(val * 2.0));
             else if (id == kParamDryWet) mix_.dryWet = static_cast<float>(val);
-            else if (id == kParamModelType) scheduler_.setModelType(static_cast<ModelType>(std::round(val * 2.0)));
+            else if (id == kParamModelType) scheduler_.setModelType(static_cast<ModelType>(std::round(val * 3.0)));
             else if (id == kParamDenoiseStrength) scheduler_.setDenoiseStrength(static_cast<float>(val));
             else if (id >= kParamVocalsGain && id <= kParamOtherGain)
                 mix_.gains[id - kParamVocalsGain] = static_cast<float>(val * 2.0);
@@ -197,6 +206,12 @@ tresult PLUGIN_API Processor::notify(IMessage* message) {
             reply->getAttributes()->setBinary("data", &snap, sizeof(snap));
             sendMessage(reply);
         }
+        return kResultOk;
+    }
+
+    if (std::strcmp(id, "InstallModel") == 0) {
+        preloadOnnxRuntimeFromPluginDir();
+        scheduler_.installSelectedModel();
         return kResultOk;
     }
 
