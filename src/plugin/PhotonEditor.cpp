@@ -343,7 +343,9 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
     const auto r = getRect();
     CRect size(r.left, r.top, r.right, r.bottom);
     logTrace("PhotonEditor::open creating CFrame");
+    logTrace("PhotonEditor::open creating CFrame");
     frame = new CFrame(size, this);
+    logTrace("PhotonEditor::open calling frame->open");
     logTrace("PhotonEditor::open calling frame->open");
     if (!frame || !frame->open(parent, platformType)) {
         logTrace("CFrame::open FAILED");
@@ -560,5 +562,6 @@ void PhotonEditor::syncParameterToUI(Steinberg::Vst::ParamID tag, Steinberg::Vst
 }
 
 } // namespace OpenPhoton
+
 
 
