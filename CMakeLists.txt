@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.24)
-project(OpenPhoton VERSION 0.2.0 LANGUAGES CXX)
+project(OpenPhoton VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,8 +19,14 @@ add_library(OpenPhotonCore STATIC
     src/core/STFTProcessor.hpp
     src/core/StemCache.hpp
     src/core/ChunkScheduler.hpp
+    src/core/Telemetry.hpp
+    src/core/WavIO.cpp
+    src/core/WavIO.hpp
 )
-target_include_directories(OpenPhotonCore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(OpenPhotonCore PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dr_libs"
+)
 target_link_libraries(OpenPhotonCore PUBLIC onnxruntime)
 
 set(SMTG_CREATE_BUNDLE_FOR_WINDOWS ON CACHE BOOL "" FORCE)

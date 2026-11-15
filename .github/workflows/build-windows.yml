@@ -11,11 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Clone VST3 SDK & Download ONNX Runtime GPU
+      - name: Clone VST3 SDK, dr_wav & Download ONNX Runtime GPU
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path third_party | Out-Null
+          New-Item -ItemType Directory -Force -Path third_party/dr_libs | Out-Null
           git clone --recursive --depth 1 https://github.com/steinbergmedia/vst3sdk.git third_party/vst3sdk
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/mackron/dr_libs/master/dr_wav.h" -OutFile "third_party/dr_libs/dr_wav.h"
           $OrtVer = "1.20.1"
           Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVer/onnxruntime-win-x64-gpu-$OrtVer.zip" -OutFile ort.zip
           Expand-Archive ort.zip -DestinationPath third_party -Force

@@ -10,6 +10,8 @@ static const Steinberg::FUID kControllerUID(0x9A4F12C2, 0x77124B8A, 0xB8E10019, 
 enum ParamIds : Steinberg::Vst::ParamID {
     kParamMode = 0,
     kParamDryWet = 1,
+    kParamModelType = 2,
+    kParamDenoiseStrength = 3,
     kParamVocalsGain = 10,
     kParamDrumsGain  = 11,
     kParamBassGain   = 12,

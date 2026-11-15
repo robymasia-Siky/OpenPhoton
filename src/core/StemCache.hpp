@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -31,11 +32,41 @@ struct AudioChunkSlot {
     std::atomic<ChunkState> state{ChunkState::Empty};
     std::vector<float> inputAudio;
     std::vector<float> stemAudio;
+    std::array<std::array<uint8_t, 8>, kNumStems> stemPeaks{};
 
     void allocate() {
         inputAudio.assign(kNumChannels * kChunkSamples, 0.0f);
         stemAudio.assign(kNumStems * kNumChannels * kChunkSamples, 0.0f);
+        for (auto& p : stemPeaks) p.fill(0);
         state.store(ChunkState::Empty, std::memory_order_release);
+    }
+
+    void updatePeaksFromInput() {
+        const size_t step = kChunkSamples / 8;
+        for (size_t b = 0; b < 8; ++b) {
+            float pk = 0.0f;
+            for (size_t i = b * step; i < (b + 1) * step; i += 16) {
+                pk = std::max(pk, std::abs(inputAudio[i]));
+                pk = std::max(pk, std::abs(inputAudio[kChunkSamples + i]));
+            }
+            const uint8_t q = static_cast<uint8_t>(std::clamp(pk * 255.0f, 0.0f, 255.0f));
+            for (size_t s = 0; s < kNumStems; ++s) stemPeaks[s][b] = q;
+        }
+    }
+
+    void updatePeaksFromStems() {
+        const size_t step = kChunkSamples / 8;
+        for (size_t s = 0; s < kNumStems; ++s) {
+            const size_t base = s * kNumChannels * kChunkSamples;
+            for (size_t b = 0; b < 8; ++b) {
+                float pk = 0.0f;
+                for (size_t i = b * step; i < (b + 1) * step; i += 16) {
+                    pk = std::max(pk, std::abs(stemAudio[base + i]));
+                    pk = std::max(pk, std::abs(stemAudio[base + kChunkSamples + i]));
+                }
+                stemPeaks[s][b] = static_cast<uint8_t>(std::clamp(pk * 255.0f, 0.0f, 255.0f));
+            }
+        }
     }
 };
 
@@ -49,6 +80,17 @@ public:
         for (auto& c : chunks_) {
             c.state.store(ChunkState::Empty, std::memory_order_release);
             std::fill(c.inputAudio.begin(), c.inputAudio.end(), 0.0f);
+            std::fill(c.stemAudio.begin(), c.stemAudio.end(), 0.0f);
+            for (auto& p : c.stemPeaks) p.fill(0);
+        }
+    }
+
+    void markAllCapturedForReprocess() {
+        for (auto& c : chunks_) {
+            const auto st = c.state.load(std::memory_order_acquire);
+            if (st == ChunkState::Ready || st == ChunkState::Computing) {
+                c.state.store(ChunkState::Captured, std::memory_order_release);
+            }
         }
     }
 

@@ -23,6 +23,7 @@ public:
     Steinberg::tresult PLUGIN_API setupProcessing(Steinberg::Vst::ProcessSetup& newSetup) override;
     Steinberg::tresult PLUGIN_API setActive(Steinberg::TBool state) override;
     Steinberg::tresult PLUGIN_API process(Steinberg::Vst::ProcessData& data) override;
+    Steinberg::tresult PLUGIN_API notify(Steinberg::Vst::IMessage* message) override;
 
 private:
     StemCache cache_;
@@ -30,6 +31,7 @@ private:
     int mode_ = 0;
     StemMixParams mix_;
     int64_t fallbackCursor_ = 0;
+    double sampleRate_ = 48000.0;
 };
 
 } // namespace OpenPhoton

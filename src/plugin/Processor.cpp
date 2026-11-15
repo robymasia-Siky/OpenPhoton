@@ -1,13 +1,15 @@
 ﻿#include "Processor.hpp"
 #include "PluginIds.hpp"
+#include "core/WavIO.hpp"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #ifdef _WIN32
 #include <windows.h>
-#include <filesystem>
 #endif
 
 namespace OpenPhoton {
@@ -32,6 +34,33 @@ void preloadOnnxRuntimeFromPluginDir() {
         LoadLibraryW((dir / L"onnxruntime.dll").c_str());
         loaded = true;
     }
+#endif
+}
+
+std::string utf16ToUtf8(const TChar* str) {
+    if (!str) return {};
+#ifdef _WIN32
+    const wchar_t* wstr = reinterpret_cast<const wchar_t*>(str);
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 1) return {};
+    std::string out(static_cast<size_t>(len - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, out.data(), len, nullptr, nullptr);
+    return out;
+#else
+    return {};
+#endif
+}
+
+std::wstring utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+#ifdef _WIN32
+    const int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (len <= 1) return {};
+    std::wstring out(static_cast<size_t>(len - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, out.data(), len);
+    return out;
+#else
+    return std::wstring(utf8.begin(), utf8.end());
 #endif
 }
 } // namespace
@@ -66,6 +95,7 @@ tresult PLUGIN_API Processor::setBusArrangements(
 }
 
 tresult PLUGIN_API Processor::setupProcessing(ProcessSetup& newSetup) {
+    sampleRate_ = newSetup.sampleRate > 0.0 ? newSetup.sampleRate : 48000.0;
     return AudioEffect::setupProcessing(newSetup);
 }
 
@@ -74,8 +104,7 @@ tresult PLUGIN_API Processor::setActive(TBool state) {
         preloadOnnxRuntimeFromPluginDir();
         std::wstring modelPath;
         if (const char* env = std::getenv("OPENPHOTON_MODEL")) {
-            std::string s(env);
-            modelPath.assign(s.begin(), s.end());
+            modelPath = utf8ToWide(env);
         }
         scheduler_.start(modelPath);
     } else {
@@ -97,6 +126,8 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
             const ParamID id = q->getParameterId();
             if (id == kParamMode) mode_ = static_cast<int>(std::round(val * 2.0));
             else if (id == kParamDryWet) mix_.dryWet = static_cast<float>(val);
+            else if (id == kParamModelType) scheduler_.setModelType(static_cast<ModelType>(std::round(val * 2.0)));
+            else if (id == kParamDenoiseStrength) scheduler_.setDenoiseStrength(static_cast<float>(val));
             else if (id >= kParamVocalsGain && id <= kParamOtherGain)
                 mix_.gains[id - kParamVocalsGain] = static_cast<float>(val * 2.0);
             else if (id >= kParamVocalsMute && id <= kParamOtherMute)
@@ -152,6 +183,53 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
 
     fallbackCursor_ = pos + data.numSamples;
     return kResultOk;
+}
+
+tresult PLUGIN_API Processor::notify(IMessage* message) {
+    if (!message) return kInvalidArgument;
+    const char* id = message->getMessageID();
+    if (!id) return AudioEffect::notify(message);
+
+    if (std::strcmp(id, "PollTelemetry") == 0) {
+        if (auto reply = Steinberg::owned(allocateMessage())) {
+            reply->setMessageID("TelemetryData");
+            auto snap = scheduler_.buildTelemetry();
+            reply->getAttributes()->setBinary("data", &snap, sizeof(snap));
+            sendMessage(reply);
+        }
+        return kResultOk;
+    }
+
+    if (std::strcmp(id, "LoadWav") == 0) {
+        TChar buf[1024]{};
+        if (message->getAttributes()->getString("path", buf, sizeof(buf)) == kResultOk) {
+            auto r = loadWavToCache(utf16ToUtf8(buf), cache_, 48000.0);
+            if (r.ok) {
+                scheduler_.notifyPlayhead(0);
+                scheduler_.wakeWorker();
+            }
+        }
+        return kResultOk;
+    }
+
+    if (std::strcmp(id, "LoadModel") == 0) {
+        TChar buf[1024]{};
+        if (message->getAttributes()->getString("path", buf, sizeof(buf)) == kResultOk) {
+            preloadOnnxRuntimeFromPluginDir();
+            scheduler_.loadModelRuntime(utf8ToWide(utf16ToUtf8(buf)));
+        }
+        return kResultOk;
+    }
+
+    if (std::strcmp(id, "ExportStems") == 0) {
+        TChar buf[1024]{};
+        if (message->getAttributes()->getString("path", buf, sizeof(buf)) == kResultOk) {
+            exportStemsToFolder(utf16ToUtf8(buf), cache_, 48000.0);
+        }
+        return kResultOk;
+    }
+
+    return AudioEffect::notify(message);
 }
 
 } // namespace OpenPhoton

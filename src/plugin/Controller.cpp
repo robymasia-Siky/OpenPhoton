@@ -3,6 +3,11 @@
 #include "PluginIds.hpp"
 #include "public.sdk/source/vst/vstparameters.h"
 #include "pluginterfaces/base/ftypes.h"
+#include <cstring>
+#include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace OpenPhoton {
 
@@ -20,6 +25,14 @@ tresult PLUGIN_API Controller::initialize(FUnknown* context) {
     parameters.addParameter(modeParam);
 
     parameters.addParameter(STR16("Dry / Wet"), STR16("%"), 0, 1.0, ParameterInfo::kCanAutomate, kParamDryWet);
+
+    auto* modelParam = new StringListParameter(STR16("Model"), kParamModelType);
+    modelParam->appendString(STR16("Music 4 Stems"));
+    modelParam->appendString(STR16("Voice 2 Stems"));
+    modelParam->appendString(STR16("Voice Restore"));
+    parameters.addParameter(modelParam);
+
+    parameters.addParameter(STR16("Denoise Strength"), STR16("%"), 0, 0.7, ParameterInfo::kCanAutomate, kParamDenoiseStrength);
 
     parameters.addParameter(STR16("Vocals Gain"), STR16("%"), 0, 0.5, ParameterInfo::kCanAutomate, kParamVocalsGain);
     parameters.addParameter(STR16("Drums Gain"),  STR16("%"), 0, 0.5, ParameterInfo::kCanAutomate, kParamDrumsGain);
@@ -60,6 +73,44 @@ void Controller::editorDestroyed(EditorView* editor) {
     if (static_cast<EditorView*>(activeEditor_) == editor) {
         activeEditor_ = nullptr;
     }
+}
+
+void Controller::sendCommandMessage(const char* msgId, const std::string& utf8Path) {
+    if (auto msg = Steinberg::owned(allocateMessage())) {
+        msg->setMessageID(msgId);
+        if (!utf8Path.empty()) {
+#ifdef _WIN32
+            const int len = MultiByteToWideChar(CP_UTF8, 0, utf8Path.c_str(), -1, nullptr, 0);
+            if (len > 0) {
+                std::vector<wchar_t> wbuf(static_cast<size_t>(len));
+                MultiByteToWideChar(CP_UTF8, 0, utf8Path.c_str(), -1, wbuf.data(), len);
+                msg->getAttributes()->setString("path", reinterpret_cast<const TChar*>(wbuf.data()));
+            }
+#endif
+        }
+        sendMessage(msg);
+    }
+}
+
+tresult PLUGIN_API Controller::notify(IMessage* message) {
+    if (!message) return kInvalidArgument;
+    const char* id = message->getMessageID();
+    if (id && std::strcmp(id, "TelemetryData") == 0) {
+        const void* ptr = nullptr;
+        uint32 size = 0;
+        if (message->getAttributes()->getBinary("data", ptr, size) == kResultOk &&
+            ptr && size == sizeof(TelemetrySnapshot)) {
+            std::lock_guard<std::mutex> lk(telemetryMtx_);
+            std::memcpy(&latestTelemetry_, ptr, sizeof(TelemetrySnapshot));
+        }
+        return kResultOk;
+    }
+    return EditController::notify(message);
+}
+
+TelemetrySnapshot Controller::getLatestTelemetry() const {
+    std::lock_guard<std::mutex> lk(telemetryMtx_);
+    return latestTelemetry_;
 }
 
 } // namespace OpenPhoton
