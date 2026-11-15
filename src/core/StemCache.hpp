@@ -9,10 +9,10 @@
 
 namespace OpenPhoton {
 
-inline constexpr size_t kNumStems = 6; // 0:Vocals, 1:Drums, 2:Bass, 3:Guitar, 4:Piano, 5:Other
+inline constexpr size_t kNumStems = 6;
 inline constexpr size_t kNumChannels = 2;
 inline constexpr size_t kChunkSamples = 48000 * 4;
-inline constexpr size_t kMaxChunks = 60; // 4 minuti @ 48 kHz
+inline constexpr size_t kMaxChunks = 45; // 3 minuti max
 
 enum class ChunkState : uint8_t {
     Empty = 0,
@@ -30,18 +30,21 @@ struct StemMixParams {
 
 struct AudioChunkSlot {
     std::atomic<ChunkState> state{ChunkState::Empty};
+    std::atomic<bool> allocated{false};
     std::vector<float> inputAudio;
     std::vector<float> stemAudio;
     std::array<std::array<uint8_t, 8>, kNumStems> stemPeaks{};
 
-    void allocate() {
+    void ensureAllocated() {
+        if (allocated.load(std::memory_order_acquire)) return;
         inputAudio.assign(kNumChannels * kChunkSamples, 0.0f);
         stemAudio.assign(kNumStems * kNumChannels * kChunkSamples, 0.0f);
         for (auto& p : stemPeaks) p.fill(0);
-        state.store(ChunkState::Empty, std::memory_order_release);
+        allocated.store(true, std::memory_order_release);
     }
 
     void updatePeaksFromInput() {
+        if (!allocated.load(std::memory_order_acquire)) return;
         const size_t step = kChunkSamples / 8;
         for (size_t b = 0; b < 8; ++b) {
             float pk = 0.0f;
@@ -55,6 +58,7 @@ struct AudioChunkSlot {
     }
 
     void updatePeaksFromStems() {
+        if (!allocated.load(std::memory_order_acquire)) return;
         const size_t step = kChunkSamples / 8;
         for (size_t s = 0; s < kNumStems; ++s) {
             const size_t base = s * kNumChannels * kChunkSamples;
@@ -72,16 +76,23 @@ struct AudioChunkSlot {
 
 class StemCache {
 public:
-    StemCache() {
-        for (auto& c : chunks_) c.allocate();
+    StemCache() = default;
+
+    void preallocateInitialChunks(size_t count = 8) {
+        const size_t n = std::min(count, kMaxChunks);
+        for (size_t i = 0; i < n; ++i) {
+            chunks_[i].ensureAllocated();
+        }
     }
 
     void clearAll() {
         for (auto& c : chunks_) {
             c.state.store(ChunkState::Empty, std::memory_order_release);
-            std::fill(c.inputAudio.begin(), c.inputAudio.end(), 0.0f);
-            std::fill(c.stemAudio.begin(), c.stemAudio.end(), 0.0f);
-            for (auto& p : c.stemPeaks) p.fill(0);
+            if (c.allocated.load(std::memory_order_acquire)) {
+                std::fill(c.inputAudio.begin(), c.inputAudio.end(), 0.0f);
+                std::fill(c.stemAudio.begin(), c.stemAudio.end(), 0.0f);
+                for (auto& p : c.stemPeaks) p.fill(0);
+            }
         }
     }
 
@@ -94,13 +105,16 @@ public:
         }
     }
 
-    void writeCaptureSample(int64_t timelineSample, float left, float right) noexcept {
+    void writeCaptureSample(int64_t timelineSample, float left, float right, bool allowAlloc = false) noexcept {
         if (timelineSample < 0) return;
         const size_t chunkIdx = static_cast<size_t>(timelineSample) / kChunkSamples;
         if (chunkIdx >= kMaxChunks) return;
-        const size_t localIdx = static_cast<size_t>(timelineSample) % kChunkSamples;
-
         auto& slot = chunks_[chunkIdx];
+        if (!slot.allocated.load(std::memory_order_acquire)) {
+            if (!allowAlloc) return;
+            slot.ensureAllocated();
+        }
+        const size_t localIdx = static_cast<size_t>(timelineSample) % kChunkSamples;
         slot.inputAudio[localIdx] = left;
         slot.inputAudio[kChunkSamples + localIdx] = right;
         if (slot.state.load(std::memory_order_acquire) == ChunkState::Empty) {
@@ -116,7 +130,8 @@ public:
         if (chunkIdx >= kMaxChunks) return false;
 
         const auto& slot = chunks_[chunkIdx];
-        if (slot.state.load(std::memory_order_acquire) != ChunkState::Ready) {
+        if (!slot.allocated.load(std::memory_order_acquire) ||
+            slot.state.load(std::memory_order_acquire) != ChunkState::Ready) {
             return false;
         }
 

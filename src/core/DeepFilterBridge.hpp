@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "DebugLog.hpp"
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
@@ -10,6 +11,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <excpt.h>
 #undef min
 #undef max
 #endif
@@ -22,14 +24,22 @@ public:
 
     bool init(const std::filesystem::path& pluginDir) {
         if (initialized_) return true;
+        if (initAttempted_) return false;
+        initAttempted_ = true;
+
 #ifdef _WIN32
         const auto dllPath = pluginDir / L"df.dll";
         const auto tarPath = pluginDir / L"DeepFilterNet3_onnx.tar.gz";
         if (!std::filesystem::exists(dllPath) || !std::filesystem::exists(tarPath)) {
+            logTrace("DeepFilterBridge: df.dll or model tar.gz not found.");
             return false;
         }
+
         hDll_ = LoadLibraryW(dllPath.c_str());
-        if (!hDll_) return false;
+        if (!hDll_) {
+            logTrace("DeepFilterBridge: LoadLibraryW(df.dll) failed.");
+            return false;
+        }
 
         fnCreate_ = reinterpret_cast<FnCreate>(GetProcAddress(hDll_, "df_create"));
         fnFrameLen_ = reinterpret_cast<FnFrameLen>(GetProcAddress(hDll_, "df_get_frame_length"));
@@ -39,20 +49,23 @@ public:
         fnFree_ = reinterpret_cast<FnFree>(GetProcAddress(hDll_, "df_free"));
 
         if (!fnCreate_ || !fnFrameLen_ || !fnProcess_ || !fnFree_) {
+            logTrace("DeepFilterBridge: missing exported symbols.");
             unload();
             return false;
         }
 
         const auto u8 = tarPath.u8string();
         modelTarUtf8_.assign(reinterpret_cast<const char*>(u8.data()), u8.size());
-        stateL_ = fnCreate_(modelTarUtf8_.c_str(), 100.0f, "error");
-        stateR_ = fnCreate_(modelTarUtf8_.c_str(), 100.0f, "error");
-        if (!stateL_ || !stateR_) {
+
+        state_ = sehCreate(fnCreate_, modelTarUtf8_.c_str(), 100.0f);
+        if (!state_) {
+            logTrace("DeepFilterBridge: df_create failed or trapped safely.");
             unload();
             return false;
         }
-        frameLen_ = fnFrameLen_(stateL_);
+        frameLen_ = sehFrameLen(fnFrameLen_, state_);
         initialized_ = (frameLen_ > 0);
+        logTrace(initialized_ ? "DeepFilterBridge: initialized OK." : "DeepFilterBridge: invalid frameLen.");
         return initialized_;
 #else
         (void)pluginDir;
@@ -61,12 +74,10 @@ public:
     }
 
     void unload() {
-        if (fnFree_) {
-            if (stateL_) fnFree_(stateL_);
-            if (stateR_) fnFree_(stateR_);
+        if (fnFree_ && state_) {
+            sehFree(fnFree_, state_);
         }
-        stateL_ = nullptr;
-        stateR_ = nullptr;
+        state_ = nullptr;
 #ifdef _WIN32
         if (hDll_) {
             FreeLibrary(hDll_);
@@ -82,57 +93,39 @@ public:
                             float* outL, float* outR,
                             size_t numSamples, float strength)
     {
-        if (!initialized_ || frameLen_ == 0) return;
+        if (!initialized_ || frameLen_ == 0 || !state_) return;
 
         const float attenDb = 6.0f + std::clamp(strength, 0.0f, 1.0f) * 94.0f;
         const float beta = (strength > 0.75f) ? (strength - 0.75f) * 0.08f : 0.0f;
-        if (fnAttenLim_) {
-            fnAttenLim_(stateL_, attenDb);
-            fnAttenLim_(stateR_, attenDb);
-        }
-        if (fnPostBeta_) {
-            fnPostBeta_(stateL_, beta);
-            fnPostBeta_(stateR_, beta);
-        }
-
-        // Ricrea stati puliti per ogni chunk indipendente + compensa 2 frame (20ms) di lookahead
-        if (fnFree_ && fnCreate_) {
-            fnFree_(stateL_);
-            fnFree_(stateR_);
-            stateL_ = fnCreate_(modelTarUtf8_.c_str(), attenDb, "error");
-            stateR_ = fnCreate_(modelTarUtf8_.c_str(), attenDb, "error");
-            if (fnPostBeta_) {
-                fnPostBeta_(stateL_, beta);
-                fnPostBeta_(stateR_, beta);
-            }
-        }
+        if (fnAttenLim_) fnAttenLim_(state_, attenDb);
+        if (fnPostBeta_) fnPostBeta_(state_, beta);
 
         const size_t delaySamples = frameLen_ * 2;
         std::vector<float> tmpIn(frameLen_, 0.0f);
         std::vector<float> tmpOut(frameLen_, 0.0f);
 
         const size_t totalFrames = (numSamples + delaySamples + frameLen_ - 1) / frameLen_;
-        std::vector<float> fullOutL(totalFrames * frameLen_, 0.0f);
-        std::vector<float> fullOutR(totalFrames * frameLen_, 0.0f);
+        std::vector<float> monoOut(totalFrames * frameLen_, 0.0f);
+
+        // Flush veloce 4 frame di silenzio per azzerare stati interni tra chunk diversi
+        for (int z = 0; z < 4; ++z) {
+            sehProcess(fnProcess_, state_, tmpIn.data(), tmpOut.data());
+        }
 
         for (size_t f = 0; f < totalFrames; ++f) {
             const size_t srcOff = f * frameLen_;
             for (size_t i = 0; i < frameLen_; ++i) {
-                tmpIn[i] = (srcOff + i < numSamples) ? inL[srcOff + i] : 0.0f;
+                tmpIn[i] = (srcOff + i < numSamples) ? 0.5f * (inL[srcOff + i] + inR[srcOff + i]) : 0.0f;
             }
-            fnProcess_(stateL_, tmpIn.data(), tmpOut.data());
-            std::copy_n(tmpOut.data(), frameLen_, fullOutL.data() + srcOff);
-
-            for (size_t i = 0; i < frameLen_; ++i) {
-                tmpIn[i] = (srcOff + i < numSamples) ? inR[srcOff + i] : 0.0f;
-            }
-            fnProcess_(stateR_, tmpIn.data(), tmpOut.data());
-            std::copy_n(tmpOut.data(), frameLen_, fullOutR.data() + srcOff);
+            sehProcess(fnProcess_, state_, tmpIn.data(), tmpOut.data());
+            std::copy_n(tmpOut.data(), frameLen_, monoOut.data() + srcOff);
         }
 
         for (size_t i = 0; i < numSamples; ++i) {
-            outL[i] = fullOutL[i + delaySamples];
-            outR[i] = fullOutR[i + delaySamples];
+            const float side = 0.5f * (inL[i] - inR[i]) * (1.0f - strength);
+            const float mid = monoOut[i + delaySamples];
+            outL[i] = mid + side;
+            outR[i] = mid - side;
         }
     }
 
@@ -144,6 +137,39 @@ private:
     using FnProcess = float (*)(void*, float*, float*);
     using FnFree = void (*)(void*);
 
+    static void* sehCreate(FnCreate fn, const char* path, float atten) {
+#ifdef _WIN32
+        __try { return fn(path, atten, nullptr); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+#else
+        return fn(path, atten, nullptr);
+#endif
+    }
+    static size_t sehFrameLen(FnFrameLen fn, void* st) {
+#ifdef _WIN32
+        __try { return fn(st); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+#else
+        return fn(st);
+#endif
+    }
+    static float sehProcess(FnProcess fn, void* st, float* in, float* out) {
+#ifdef _WIN32
+        __try { return fn(st, in, out); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return 0.0f; }
+#else
+        return fn(st, in, out);
+#endif
+    }
+    static void sehFree(FnFree fn, void* st) {
+#ifdef _WIN32
+        __try { fn(st); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+#else
+        fn(st);
+#endif
+    }
+
 #ifdef _WIN32
     HMODULE hDll_ = nullptr;
 #endif
@@ -153,12 +179,11 @@ private:
     FnPostBeta fnPostBeta_ = nullptr;
     FnProcess fnProcess_ = nullptr;
     FnFree fnFree_ = nullptr;
-    void* stateL_ = nullptr;
-    void* stateR_ = nullptr;
+    void* state_ = nullptr;
     size_t frameLen_ = 0;
     bool initialized_ = false;
+    bool initAttempted_ = false;
     std::string modelTarUtf8_;
 };
 
 } // namespace OpenPhoton
-

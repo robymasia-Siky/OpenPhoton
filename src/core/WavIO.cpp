@@ -72,7 +72,7 @@ WavLoadResult loadWavToCache(const std::string& utf8Path, StemCache& cache, doub
         const float r1 = interleaved[idx1 * channels + rCh];
         const float right = r0 + (r1 - r0) * frac;
 
-        cache.writeCaptureSample(static_cast<int64_t>(i), left, right);
+        cache.writeCaptureSample(static_cast<int64_t>(i), left, right, true);
     }
 
     res.ok = true;
@@ -135,3 +135,4 @@ bool exportStemsToFolder(const std::string& folderUtf8, const StemCache& cache, 
 }
 
 } // namespace OpenPhoton
+

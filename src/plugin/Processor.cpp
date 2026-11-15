@@ -1,6 +1,7 @@
 ﻿#include "Processor.hpp"
 #include "PluginIds.hpp"
 #include "core/WavIO.hpp"
+#include "core/DebugLog.hpp"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include <algorithm>
@@ -79,6 +80,7 @@ Processor::Processor() {
 }
 
 tresult PLUGIN_API Processor::initialize(FUnknown* context) {
+    logTrace("Processor::initialize");
     tresult res = AudioEffect::initialize(context);
     if (res != kResultOk) return res;
 
@@ -109,7 +111,9 @@ tresult PLUGIN_API Processor::setupProcessing(ProcessSetup& newSetup) {
 }
 
 tresult PLUGIN_API Processor::setActive(TBool state) {
+    logTrace(state ? "Processor::setActive(true)" : "Processor::setActive(false)");
     if (state) {
+        cache_.preallocateInitialChunks(8);
         preloadOnnxRuntimeFromPluginDir();
         std::wstring modelPath;
         if (const char* env = std::getenv("OPENPHOTON_MODEL")) {
@@ -248,3 +252,4 @@ tresult PLUGIN_API Processor::notify(IMessage* message) {
 }
 
 } // namespace OpenPhoton
+

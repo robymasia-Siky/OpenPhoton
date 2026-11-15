@@ -36,7 +36,7 @@ public:
     void start(const std::filesystem::path& pluginDir, const std::wstring& customOnnxPath) {
         stop();
         pluginDir_ = pluginDir;
-        dfBridge_.init(pluginDir_);
+        // Lazy init di DeepFilter3 solo quando si usa VoiceRestore
 
         if (!customOnnxPath.empty()) {
             attachModel(customOnnxPath);
@@ -72,7 +72,7 @@ public:
             std::lock_guard<std::mutex> lk(engineMtx_);
             engine_.reset();
         }
-        dfBridge_.unload();
+        // dfBridge_ viene mantenuto o distrutto a chiusura plugin
     }
 
     void setModelType(ModelType t) {
@@ -229,6 +229,9 @@ private:
             const auto mode = modelType_.load(std::memory_order_relaxed);
             bool handled = false;
 
+            if (mode == ModelType::VoiceRestore) {
+                if (!dfBridge_.isReady()) dfBridge_.init(pluginDir_);
+            }
             if (mode == ModelType::VoiceRestore && dfBridge_.isReady()) {
                 std::fill(s.stemAudio.begin(), s.stemAudio.end(), 0.0f);
                 dfBridge_.processStereoChunk(
@@ -468,3 +471,4 @@ private:
 };
 
 } // namespace OpenPhoton
+

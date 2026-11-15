@@ -1,6 +1,7 @@
 ﻿#include "Controller.hpp"
 #include "PhotonEditor.hpp"
 #include "PluginIds.hpp"
+#include "core/DebugLog.hpp"
 #include "public.sdk/source/vst/vstparameters.h"
 #include "pluginterfaces/base/ftypes.h"
 #include <cstring>
@@ -61,6 +62,7 @@ tresult PLUGIN_API Controller::initialize(FUnknown* context) {
 }
 
 IPlugView* PLUGIN_API Controller::createView(FIDString name) {
+    logTrace("Controller::createView");
     if (FIDStringsEqual(name, ViewType::kEditor)) {
         activeEditor_ = new PhotonEditor(this);
         return activeEditor_;
@@ -121,3 +123,4 @@ TelemetrySnapshot Controller::getLatestTelemetry() const {
 }
 
 } // namespace OpenPhoton
+

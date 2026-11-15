@@ -1,5 +1,6 @@
 ﻿#include "PhotonEditor.hpp"
 #include "Controller.hpp"
+#include "core/DebugLog.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -333,6 +334,7 @@ PhotonEditor::PhotonEditor(Controller* controller)
 }
 
 bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformType) {
+    logTrace("PhotonEditor::open start");
     if (frame) {
         frame->forget();
         frame = nullptr;
@@ -342,6 +344,7 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
     CRect size(r.left, r.top, r.right, r.bottom);
     frame = new CFrame(size, this);
     if (!frame || !frame->open(parent, platformType)) {
+        logTrace("CFrame::open FAILED");
         return false;
     }
 
@@ -437,6 +440,7 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
         }
     }, 66);
     timer_->start();
+    logTrace("PhotonEditor::open OK");
 
     return true;
 }
@@ -554,3 +558,4 @@ void PhotonEditor::syncParameterToUI(Steinberg::Vst::ParamID tag, Steinberg::Vst
 }
 
 } // namespace OpenPhoton
+
