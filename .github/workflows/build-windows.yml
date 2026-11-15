@@ -9,7 +9,7 @@ jobs:
   build-win64:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Clone VST3 SDK & Download ONNX Runtime GPU
         shell: pwsh
@@ -28,8 +28,14 @@ jobs:
       - name: Build Release
         run: cmake --build build --config Release -j 4
 
+      - name: Prepare VST3 Bundle Folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Recurse -Force "build/VST3/Release/OpenPhoton.vst3" "dist/OpenPhoton.vst3"
+
       - name: Upload OpenPhoton.vst3 Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: OpenPhoton-Win64-VST3
-          path: build/VST3/Release/OpenPhoton.vst3/**
+          path: dist/

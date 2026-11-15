@@ -48,6 +48,8 @@ target_link_libraries(OpenPhoton PRIVATE
 )
 
 if(WIN32)
+    target_link_libraries(OpenPhoton PRIVATE delayimp)
+    target_link_options(OpenPhoton PRIVATE "/DELAYLOAD:onnxruntime.dll")
     add_custom_command(TARGET OpenPhoton POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${ORT_ROOT}/lib/onnxruntime.dll"

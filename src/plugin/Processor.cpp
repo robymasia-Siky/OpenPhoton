@@ -5,11 +5,36 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#ifdef _WIN32
+#include <windows.h>
+#include <filesystem>
+#endif
 
 namespace OpenPhoton {
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
+
+namespace {
+void preloadOnnxRuntimeFromPluginDir() {
+#ifdef _WIN32
+    static bool loaded = false;
+    if (loaded) return;
+    HMODULE hMod = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&preloadOnnxRuntimeFromPluginDir),
+                           &hMod)) {
+        wchar_t pathBuf[MAX_PATH]{};
+        GetModuleFileNameW(hMod, pathBuf, MAX_PATH);
+        auto dir = std::filesystem::path(pathBuf).parent_path();
+        LoadLibraryW((dir / L"onnxruntime_providers_shared.dll").c_str());
+        LoadLibraryW((dir / L"onnxruntime.dll").c_str());
+        loaded = true;
+    }
+#endif
+}
+} // namespace
 
 Processor::Processor() {
     setControllerClass(kControllerUID);
@@ -46,6 +71,7 @@ tresult PLUGIN_API Processor::setupProcessing(ProcessSetup& newSetup) {
 
 tresult PLUGIN_API Processor::setActive(TBool state) {
     if (state) {
+        preloadOnnxRuntimeFromPluginDir();
         std::wstring modelPath;
         if (const char* env = std::getenv("OPENPHOTON_MODEL")) {
             std::string s(env);
