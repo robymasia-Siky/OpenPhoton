@@ -16,6 +16,7 @@ using namespace Steinberg;
 using namespace Steinberg::Vst;
 
 tresult PLUGIN_API Controller::initialize(FUnknown* context) {
+    logTrace("Controller::initialize start");
     tresult res = EditController::initialize(context);
     if (res != kResultOk) return res;
 
@@ -58,6 +59,7 @@ tresult PLUGIN_API Controller::initialize(FUnknown* context) {
     parameters.addParameter(STR16("Other Solo"),  nullptr, 1, 0.0, ParameterInfo::kCanAutomate, kParamOtherSolo);
 
     parameters.addParameter(STR16("Clear Cache"), nullptr, 1, 0.0, 0, kParamClearCache);
+    logTrace("Controller::initialize end");
     return kResultOk;
 }
 
@@ -123,4 +125,5 @@ TelemetrySnapshot Controller::getLatestTelemetry() const {
 }
 
 } // namespace OpenPhoton
+
 

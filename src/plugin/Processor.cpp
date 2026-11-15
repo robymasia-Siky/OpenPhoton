@@ -10,7 +10,12 @@
 #include <cstring>
 #include <filesystem>
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
+#undef min
+#undef max
 #endif
 
 namespace OpenPhoton {
@@ -90,6 +95,7 @@ tresult PLUGIN_API Processor::initialize(FUnknown* context) {
 }
 
 tresult PLUGIN_API Processor::terminate() {
+    logTrace("Processor::terminate");
     scheduler_.stop();
     return AudioEffect::terminate();
 }
@@ -106,27 +112,39 @@ tresult PLUGIN_API Processor::setBusArrangements(
 }
 
 tresult PLUGIN_API Processor::setupProcessing(ProcessSetup& newSetup) {
+    logTrace("Processor::setupProcessing");
     sampleRate_ = newSetup.sampleRate > 0.0 ? newSetup.sampleRate : 48000.0;
     return AudioEffect::setupProcessing(newSetup);
 }
 
 tresult PLUGIN_API Processor::setActive(TBool state) {
-    logTrace(state ? "Processor::setActive(true)" : "Processor::setActive(false)");
+    logTrace(state ? "Processor::setActive(true) start" : "Processor::setActive(false) start");
     if (state) {
         cache_.preallocateInitialChunks(8);
+        logTrace("Processor::setActive after preallocate");
         preloadOnnxRuntimeFromPluginDir();
+        logTrace("Processor::setActive after preloadOnnx");
         std::wstring modelPath;
         if (const char* env = std::getenv("OPENPHOTON_MODEL")) {
             modelPath = utf8ToWide(env);
         }
         scheduler_.start(getPluginDir(), modelPath);
+        logTrace("Processor::setActive after scheduler.start");
     } else {
         scheduler_.stop();
     }
-    return AudioEffect::setActive(state);
+    auto res = AudioEffect::setActive(state);
+    logTrace("Processor::setActive end");
+    return res;
 }
 
 tresult PLUGIN_API Processor::process(ProcessData& data) {
+    static bool firstProcessLogged = false;
+    if (!firstProcessLogged) {
+        firstProcessLogged = true;
+        logTrace("Processor::process first call");
+    }
+
     if (data.inputParameterChanges) {
         const int32 numParams = data.inputParameterChanges->getParameterCount();
         for (int32 i = 0; i < numParams; ++i) {
@@ -134,7 +152,8 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
             if (!q) continue;
             ParamValue val = 0.0;
             int32 sampleOffset = 0;
-            if (q->getPoint(q->getPointCount() - 1, sampleOffset, val) != kResultOk) continue;
+            const int32 count = q->getPointCount();
+            if (count <= 0 || q->getPoint(count - 1, sampleOffset, val) != kResultOk) continue;
 
             const ParamID id = q->getParameterId();
             if (id == kParamMode) mode_ = static_cast<int>(std::round(val * 2.0));
@@ -154,11 +173,19 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
 
     if (data.numInputs == 0 || data.numOutputs == 0 || data.numSamples <= 0)
         return kResultOk;
+    if (!data.inputs[0].channelBuffers32 || !data.outputs[0].channelBuffers32)
+        return kResultOk;
+    if (data.inputs[0].numChannels < 1 || data.outputs[0].numChannels < 1)
+        return kResultOk;
 
     float* inL  = data.inputs[0].channelBuffers32[0];
-    float* inR  = data.inputs[0].channelBuffers32[1];
+    float* inR  = (data.inputs[0].numChannels > 1 && data.inputs[0].channelBuffers32[1])
+                    ? data.inputs[0].channelBuffers32[1] : inL;
     float* outL = data.outputs[0].channelBuffers32[0];
-    float* outR = data.outputs[0].channelBuffers32[1];
+    float* outR = (data.outputs[0].numChannels > 1 && data.outputs[0].channelBuffers32[1])
+                    ? data.outputs[0].channelBuffers32[1] : nullptr;
+
+    if (!inL || !outL) return kResultOk;
 
     int64_t pos = fallbackCursor_;
     bool playing = true;
@@ -173,7 +200,7 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
         for (int32 s = 0; s < data.numSamples; ++s) {
             cache_.writeCaptureSample(pos + s, inL[s], inR[s]);
             outL[s] = inL[s];
-            outR[s] = inR[s];
+            if (outR) outR[s] = inR[s];
         }
         scheduler_.notifyPlayhead(pos);
         scheduler_.wakeWorker();
@@ -183,15 +210,15 @@ tresult PLUGIN_API Processor::process(ProcessData& data) {
             float mL = 0.0f, mR = 0.0f;
             if (cache_.readMixedSample(pos + s, mix_, mL, mR)) {
                 outL[s] = mL;
-                outR[s] = mR;
+                if (outR) outR[s] = mR;
             } else {
                 outL[s] = inL[s];
-                outR[s] = inR[s];
+                if (outR) outR[s] = inR[s];
             }
         }
     } else {
         if (outL != inL) std::copy_n(inL, data.numSamples, outL);
-        if (outR != inR) std::copy_n(inR, data.numSamples, outR);
+        if (outR && outR != inR) std::copy_n(inR, data.numSamples, outR);
     }
 
     fallbackCursor_ = pos + data.numSamples;
@@ -252,4 +279,3 @@ tresult PLUGIN_API Processor::notify(IMessage* message) {
 }
 
 } // namespace OpenPhoton
-
