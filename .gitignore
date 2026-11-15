@@ -1,0 +1,7 @@
+﻿build/
+out/
+.vs/
+third_party/
+*.onnx
+*.vst3
+*.user
