@@ -19,7 +19,8 @@ jobs:
           $OrtVer = "1.20.1"
           Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVer/onnxruntime-win-x64-gpu-$OrtVer.zip" -OutFile ort.zip
           Expand-Archive ort.zip -DestinationPath third_party -Force
-          Rename-Item "third_party/onnxruntime-win-x64-gpu-$OrtVer" "third_party/onnxruntime"
+          Rename-Item "third_party/onnxruntime-win-x64-gpu-$OrtVer" "onnxruntime"
+          Remove-Item ort.zip -Force
 
       - name: Configure CMake
         run: cmake -B build -G "Visual Studio 17 2022" -A x64
