@@ -18,14 +18,13 @@ inline CColor colMuted()   { return CColor(140, 152, 175, 255); }
 
 inline CColor stemColor(int idx) {
     switch (idx) {
-        case 0: return CColor(76, 201, 240, 255);   // Vocals - Cyan
-        case 1: return CColor(247, 37, 133, 255);   // Drums  - Magenta
-        case 2: return CColor(247, 127, 0, 255);    // Bass   - Amber
-        default: return CColor(128, 237, 153, 255); // Other  - Mint
+        case 0: return CColor(76, 201, 240, 255);
+        case 1: return CColor(247, 37, 133, 255);
+        case 2: return CColor(247, 127, 0, 255);
+        default: return CColor(128, 237, 153, 255);
     }
 }
 
-// Sfondo + Visualizzatore multi-stem stile Photon
 class PhotonBackdropView : public CView {
 public:
     explicit PhotonBackdropView(const CRect& size) : CView(size) {}
@@ -35,7 +34,6 @@ public:
         ctx->setFillColor(colBg());
         ctx->drawRect(r, kDrawFilled);
 
-        // Header bar
         CRect header(r.left, r.top, r.right, r.top + 64);
         ctx->setFillColor(colPanel());
         ctx->drawRect(header, kDrawFilled);
@@ -43,7 +41,6 @@ public:
         ctx->setLineWidth(1.0);
         ctx->drawLine(CPoint(r.left, r.top + 64), CPoint(r.right, r.top + 64));
 
-        // Logo OPENPHOTON
         ctx->setFont(kNormalFont, 18, kBoldFace);
         ctx->setFontColor(CColor(76, 201, 240, 255));
         ctx->drawString("OPEN", CRect(24, 16, 90, 48), kLeftText, true);
@@ -54,21 +51,18 @@ public:
         ctx->setFontColor(colMuted());
         ctx->drawString("AI STEM DEMIX & RESTORE  |  GPU ONNX", CRect(24, 40, 280, 56), kLeftText, true);
 
-        // Waveform Viewport
         CRect waveBox(24, 80, r.right - 24, 270);
         ctx->setFillColor(CColor(11, 14, 20, 255));
         ctx->drawRect(waveBox, kDrawFilled);
         ctx->setFrameColor(colBorder());
         ctx->drawRect(waveBox, kDrawStroked);
 
-        // Griglia timeline
         ctx->setFrameColor(CColor(30, 36, 50, 255));
         for (int i = 1; i < 8; ++i) {
             const CCoord x = waveBox.left + (waveBox.getWidth() * i) / 8.0;
             ctx->drawLine(CPoint(x, waveBox.top + 1), CPoint(x, waveBox.bottom - 1));
         }
 
-        // 4 corsie spettro/waveform colorate sovrapposte
         const char* labels[4] = { "VOCALS", "DRUMS", "BASS", "OTHER" };
         const CCoord laneH = waveBox.getHeight() / 4.0;
         for (int s = 0; s < 4; ++s) {
@@ -90,16 +84,16 @@ public:
             }
         }
 
-        // Hint in basso
         ctx->setFont(kNormalFont, 11, kNormalFace);
         ctx->setFontColor(colMuted());
         ctx->drawString("Workflow: 1) Seleziona 'Capture & Demix' e premi Play   2) Passa a 'Stem Playback' per mixare gli stem",
                         CRect(24, r.bottom - 26, r.right - 24, r.bottom - 8), kLeftText, true);
         setDirty(false);
     }
+
+    CLASS_METHODS_NOCOPY(PhotonBackdropView, CView)
 };
 
-// Slider vettoriale custom
 class PhotonSlider : public CControl {
 public:
     PhotonSlider(const CRect& size, IControlListener* listener, int32_t tag,
@@ -114,7 +108,6 @@ public:
         ctx->setLineWidth(1.0);
         ctx->drawRect(r, kDrawStroked);
 
-        // Barra track verticale
         const CRect track(r.left + r.getWidth() * 0.42, r.top + 30,
                           r.left + r.getWidth() * 0.58, r.bottom - 36);
         ctx->setFillColor(CColor(12, 15, 22, 255));
@@ -126,12 +119,10 @@ public:
         ctx->setFillColor(accent_);
         ctx->drawRect(fillRect, kDrawFilled);
 
-        // Handle
         CRect knob(track.left - 8, fillTop - 5, track.right + 8, fillTop + 5);
         ctx->setFillColor(colText());
         ctx->drawRect(knob, kDrawFilled);
 
-        // Titolo e Valore
         ctx->setFont(kNormalFont, 11, kBoldFace);
         ctx->setFontColor(accent_);
         ctx->drawString(title_.c_str(), CRect(r.left, r.top + 6, r.right, r.top + 24), kCenterText, true);
@@ -168,6 +159,8 @@ public:
         return kMouseEventHandled;
     }
 
+    CLASS_METHODS_NOCOPY(PhotonSlider, CControl)
+
 private:
     void updateFromPoint(const CPoint& where) {
         const CRect r = getViewSize();
@@ -188,7 +181,6 @@ private:
     bool dragging_ = false;
 };
 
-// Bottone Toggle / Selettore Mode
 class PhotonButton : public CControl {
 public:
     PhotonButton(const CRect& size, IControlListener* listener, int32_t tag,
@@ -231,6 +223,8 @@ public:
         return kMouseEventHandled;
     }
 
+    CLASS_METHODS_NOCOPY(PhotonButton, CControl)
+
 private:
     std::string label_;
     CColor activeColor_;
@@ -262,11 +256,8 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
     }
 
     controls_.clear();
-
-    // Sfondo + Waveform
     frame->addView(new PhotonBackdropView(size));
 
-    // Selettore Mode in Header (Bypass | Capture & Demix | Stem Playback)
     const char* modeLabels[3] = { "Bypass", "Capture & Demix", "Stem Playback" };
     const float modeVals[3]   = { 0.0f, 0.5f, 1.0f };
     const CColor modeCols[3]  = { CColor(160, 170, 190, 255), CColor(247, 37, 133, 255), CColor(76, 201, 240, 255) };
@@ -280,13 +271,11 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
         controls_[kParamMode + 1000 + m] = btn;
     }
 
-    // Bottone Clear Cache
     auto* clearBtn = new PhotonButton(CRect(776, 16, 896, 48), this, kParamClearCache,
                                       "Clear Cache", CColor(247, 127, 0, 255), 1.0f, true);
     frame->addView(clearBtn);
     controls_[kParamClearCache] = clearBtn;
 
-    // 4 Strip Stem (Vocals, Drums, Bass, Other)
     const char* stemTitles[4] = { "VOCALS", "DRUMS", "BASS", "OTHER" };
     for (int i = 0; i < 4; ++i) {
         const CCoord x = 24 + i * 176;
@@ -310,7 +299,6 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
         controls_[kParamVocalsSolo + i] = soloBtn;
     }
 
-    // Master Dry/Wet Slider
     auto* dryWet = new PhotonSlider(CRect(736, 286, 896, 496), this, kParamDryWet,
                                     CColor(120, 160, 255, 255), "DRY / WET", false);
     dryWet->setValue(static_cast<float>(controller->getParamNormalized(kParamDryWet)));
