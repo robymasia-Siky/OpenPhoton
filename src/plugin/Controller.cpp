@@ -1,6 +1,8 @@
 ﻿#include "Controller.hpp"
+#include "PhotonEditor.hpp"
 #include "PluginIds.hpp"
 #include "public.sdk/source/vst/vstparameters.h"
+#include "pluginterfaces/base/ftypes.h"
 
 namespace OpenPhoton {
 
@@ -36,6 +38,28 @@ tresult PLUGIN_API Controller::initialize(FUnknown* context) {
 
     parameters.addParameter(STR16("Clear Cache"), nullptr, 1, 0.0, 0, kParamClearCache);
     return kResultOk;
+}
+
+IPlugView* PLUGIN_API Controller::createView(FIDString name) {
+    if (FIDStringsEqual(name, ViewType::kEditor)) {
+        activeEditor_ = new PhotonEditor(this);
+        return activeEditor_;
+    }
+    return nullptr;
+}
+
+tresult PLUGIN_API Controller::setParamNormalized(ParamID tag, ParamValue value) {
+    tresult res = EditController::setParamNormalized(tag, value);
+    if (activeEditor_) {
+        activeEditor_->syncParameterToUI(tag, value);
+    }
+    return res;
+}
+
+void Controller::editorDestroyed(EditorView* editor) {
+    if (static_cast<EditorView*>(activeEditor_) == editor) {
+        activeEditor_ = nullptr;
+    }
 }
 
 } // namespace OpenPhoton

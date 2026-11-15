@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.24)
-project(OpenPhoton VERSION 0.1.0 LANGUAGES CXX)
+project(OpenPhoton VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,7 +26,7 @@ target_link_libraries(OpenPhotonCore PUBLIC onnxruntime)
 set(SMTG_CREATE_BUNDLE_FOR_WINDOWS ON CACHE BOOL "" FORCE)
 set(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SMTG_ENABLE_VST3_HOSTING_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(SMTG_ENABLE_VSTGUI_SUPPORT OFF CACHE BOOL "" FORCE)
+set(SMTG_ENABLE_VSTGUI_SUPPORT ON CACHE BOOL "" FORCE)
 set(SMTG_RUN_VST_VALIDATOR OFF CACHE BOOL "" FORCE)
 
 set(vst3sdk_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vst3sdk")
@@ -40,10 +40,13 @@ smtg_add_vst3plugin(OpenPhoton
     src/plugin/Processor.cpp
     src/plugin/Controller.hpp
     src/plugin/Controller.cpp
+    src/plugin/PhotonEditor.hpp
+    src/plugin/PhotonEditor.cpp
 )
 
 target_link_libraries(OpenPhoton PRIVATE
     sdk
+    vstgui_support
     OpenPhotonCore
 )
 
