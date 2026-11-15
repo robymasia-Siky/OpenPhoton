@@ -11,7 +11,6 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <excpt.h>
 #undef min
 #undef max
 #endif
@@ -107,7 +106,6 @@ public:
         const size_t totalFrames = (numSamples + delaySamples + frameLen_ - 1) / frameLen_;
         std::vector<float> monoOut(totalFrames * frameLen_, 0.0f);
 
-        // Flush veloce 4 frame di silenzio per azzerare stati interni tra chunk diversi
         for (int z = 0; z < 4; ++z) {
             sehProcess(fnProcess_, state_, tmpIn.data(), tmpOut.data());
         }
@@ -137,38 +135,10 @@ private:
     using FnProcess = float (*)(void*, float*, float*);
     using FnFree = void (*)(void*);
 
-    static void* sehCreate(FnCreate fn, const char* path, float atten) {
-#ifdef _WIN32
-        __try { return fn(path, atten, nullptr); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
-#else
-        return fn(path, atten, nullptr);
-#endif
-    }
-    static size_t sehFrameLen(FnFrameLen fn, void* st) {
-#ifdef _WIN32
-        __try { return fn(st); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-#else
-        return fn(st);
-#endif
-    }
-    static float sehProcess(FnProcess fn, void* st, float* in, float* out) {
-#ifdef _WIN32
-        __try { return fn(st, in, out); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { return 0.0f; }
-#else
-        return fn(st, in, out);
-#endif
-    }
-    static void sehFree(FnFree fn, void* st) {
-#ifdef _WIN32
-        __try { fn(st); }
-        __except (EXCEPTION_EXECUTE_HANDLER) {}
-#else
-        fn(st);
-#endif
-    }
+    static void* sehCreate(FnCreate fn, const char* path, float atten);
+    static size_t sehFrameLen(FnFrameLen fn, void* st);
+    static float sehProcess(FnProcess fn, void* st, float* in, float* out);
+    static void sehFree(FnFree fn, void* st);
 
 #ifdef _WIN32
     HMODULE hDll_ = nullptr;

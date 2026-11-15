@@ -22,6 +22,7 @@ add_library(OpenPhotonCore STATIC
     src/core/Telemetry.hpp
     src/core/WavIO.cpp
     src/core/WavIO.hpp
+    src/core/DeepFilterBridge.cpp
     src/core/DeepFilterBridge.hpp
     src/core/ModelManager.hpp
 )
@@ -70,4 +71,5 @@ if(WIN32)
             "$<TARGET_FILE_DIR:OpenPhoton>"
     )
 endif()
+
 
