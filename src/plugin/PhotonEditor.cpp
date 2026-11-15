@@ -310,7 +310,7 @@ bool PLUGIN_API PhotonEditor::open(void* parent, const PlatformType& platformTyp
 
 void PLUGIN_API PhotonEditor::close() {
     controls_.clear();
-    VSTGUIEditor::close();
+    if (frame) { auto* oldFrame = frame; frame = nullptr; oldFrame->forget(); }
 }
 
 void PhotonEditor::valueChanged(CControl* pControl) {
@@ -353,3 +353,4 @@ void PhotonEditor::syncParameterToUI(Steinberg::Vst::ParamID tag, Steinberg::Vst
 }
 
 } // namespace OpenPhoton
+
